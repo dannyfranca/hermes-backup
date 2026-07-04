@@ -1,0 +1,11 @@
+# Inert source template for future installer work.
+# Do not copy directly without replacing EXAMPLE_* paths and creating local secret config.
+
+[Unit]
+Description=Hermes VM backup to restic/B2
+Documentation=https://github.com/dannyfranca/hermes-backup
+
+[Service]
+Type=oneshot
+EnvironmentFile=EXAMPLE_LOCAL_CONFIG_DIR/hermes-backup.env
+ExecStart=EXAMPLE_REPO_PATH/scripts/backup

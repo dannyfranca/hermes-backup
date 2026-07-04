@@ -1,0 +1,57 @@
+# Local secret/config material (never commit)
+.env
+.env.*
+*.env
+*.env.local
+config/*.local
+config/*.secret
+config/*.secrets
+config/*.private
+config/restic-password*
+config/b2-*.json
+config/telegram-*.json
+secrets/
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Runtime outputs and generated state
+logs/
+staging/
+restore/
+archives/
+backups/
+.review/
+*.log
+*.sqlite-backup
+*.sqlite3-backup
+*.db-backup
+*.tar
+*.tar.*
+*.tgz
+*.zip
+*.7z
+*.restic
+
+# Dependency/build/cache outputs
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+cache/
+restic-cache/
+node_modules/
+dist/
+build/
+.coverage
+htmlcov/
+
+# Large or rebuildable local artifacts
+models/
+model-cache/
+media/
+downloads/
