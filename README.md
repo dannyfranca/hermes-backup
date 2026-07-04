@@ -35,6 +35,7 @@ Excluded state:
 ```text
 config/        Placeholder-only config examples and future include/exclude manifests.
 docs/          Bootstrap and recovery documentation.
+scripts/       User-facing offline/runtime checks and future VM commands.
 systemd/user/  Inert source templates for user systemd services/timers.
 tests/         Offline tests for repository contracts and safety checks.
 ```
@@ -48,4 +49,4 @@ Collocation baseline:
 
 ## Current status
 
-This foundation ticket only establishes repo structure, docs, ignore rules, placeholder config, inert systemd templates, and safety tests. Backup, check, restore, promote, bootstrap, Telegram, and live secret collection behavior are downstream work.
+This foundation slice establishes repo structure, docs, ignore rules, placeholder config, inert systemd templates, and the offline preflight contract at `scripts/preflight.sh --check`. Backup, check, restore, promote, bootstrap secret collection, Telegram delivery, and live timer enablement remain downstream work.
