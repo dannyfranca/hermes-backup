@@ -49,4 +49,4 @@ Collocation baseline:
 
 ## Current status
 
-This foundation slice establishes repo structure, docs, ignore rules, placeholder config, inert systemd templates, and the offline preflight contract at `scripts/preflight.sh --check`. Backup, check, restore, promote, bootstrap secret collection, Telegram delivery, and live timer enablement remain downstream work.
+This foundation slice establishes repo structure, docs, ignore rules, placeholder config, inert systemd templates, safety tests, and the offline preflight contract at `scripts/preflight.sh --check`. This repo now also includes `scripts/configure.sh`, a local-only config/secret prompt writer that creates owner-only config files outside Git. Backup, check, restore, promote, bootstrap install orchestration, Telegram delivery, and live timer enablement remain downstream work.

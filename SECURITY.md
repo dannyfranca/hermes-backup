@@ -16,7 +16,7 @@ Committed examples must use obvious placeholder/example strings only, such as `P
 
 ## Local secret storage
 
-Future bootstrap work must prompt locally and store live values outside the repository with owner-only permissions. Danny's password manager is the recovery source for the B2 key, restic password, and Telegram alert credential.
+`scripts/configure.sh` prompts locally and stores live values outside the repository with owner-only permissions. Danny's password manager is the recovery source for the B2 key, restic password, restic repository, and Telegram alert credential.
 
 ## Restore safety
 

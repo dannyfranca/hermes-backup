@@ -1,17 +1,56 @@
 # Bootstrap baseline
 
-This document defines the bootstrap contract for future implementation tickets. The current foundation slice does not install packages, collect secrets, enable timers, or run backup/restore behavior.
+This document defines the bootstrap contract for the foundation implementation tickets. The current slice adds only the local config/secret prompt writer; it does not install packages, enable timers, initialize restic, or run backup/restore behavior.
+
+## Local config writer
+
+Run the config writer from a local terminal on the VM:
+
+```bash
+scripts/configure.sh
+```
+
+It prompts locally for:
+
+1. Backblaze B2 key ID.
+2. Backblaze B2 application key.
+3. Restic repository, for example `b2:bucket-name:path`.
+4. Restic repository password.
+5. Telegram bot token for raw Bot API alerts.
+6. Telegram chat ID for backup alerts.
+
+The script writes local-only files outside the repository, defaulting to:
+
+```text
+~/.config/hermes-backup/hermes-backup.env
+~/.config/hermes-backup/restic-password
+```
+
+The config directory is restricted to `0700`, and both generated files are restricted to `0600`. Secret prompts use silent input where appropriate, and the script prints file paths/status only, never populated secret values.
+
+For tests or disposable automation only, the script also supports:
+
+```bash
+B2_ACCOUNT_ID=... \
+B2_ACCOUNT_KEY=... \
+RESTIC_REPOSITORY=... \
+RESTIC_PASSWORD=... \
+TELEGRAM_BOT_TOKEN=... \
+TELEGRAM_CHAT_ID=... \
+scripts/configure.sh --config-dir /absolute/test/config/dir --non-interactive
+```
+
+Use obvious dummy values in non-interactive mode. Do not pass real secrets through chat, CI logs, shell history, GitHub, or committed files.
 
 ## Future bootstrap goals
 
 A downstream `bootstrap` command should:
 
 1. Verify or install required local tools: `restic`, `sqlite3`, `rsync`, and `curl`.
-2. Prompt Danny locally for Backblaze B2, restic, and Telegram alert settings.
-3. Write local config/env files outside the repository with owner-only permissions.
-4. Install user systemd service/timer units from inert repo templates.
-5. Initialize or verify the restic repository.
-6. Run first-use verification before enabling timers.
+2. Call or reuse this config writer instead of reimplementing secret collection.
+3. Install user systemd service/timer units from inert repo templates.
+4. Initialize or verify the restic repository.
+5. Run first-use verification before enabling timers.
 
 ## Dependency preflight
 
@@ -47,7 +86,7 @@ Expected local-only files for downstream work may include paths such as:
 ~/.config/hermes-backup/restic-password
 ```
 
-Those paths are examples of where local state may live; this ticket does not create them.
+Those paths are examples of where local state lives. They are generated locally by `scripts/configure.sh` and must remain outside Git.
 
 ## Scheduling contract
 
@@ -59,6 +98,6 @@ Systemd files in `systemd/user/` are source templates only until a downstream in
 
 - No backup/check/restore/promote/drill commands.
 - No package installation.
-- No live B2, restic, or Telegram prompts.
+- No network validation against B2, restic, or Telegram.
 - No timer enablement.
 - No restic repository initialization.
