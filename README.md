@@ -40,7 +40,7 @@ systemd/user/  Inert source templates for user systemd services/timers.
 tests/         Offline tests for repository contracts and safety checks.
 ```
 
-## Backup scope manifests and dry-run inventory
+## Backup scope manifests, dry-run inventory, and SQLite-safe staging
 
 The staging scope is versioned under `config/manifests/`:
 
@@ -54,6 +54,10 @@ scripts/inventory-dry-run.sh
 ```
 
 The command prints only path/count/status output. It does not print file contents, secrets, B2 keys, restic passwords, Telegram tokens, or backup archives. It exits non-zero if an included tree contains a forbidden class such as Honcho, Git/worktrees, dependency folders, caches/build outputs, model/media paths, Proxmox paths, runtime staging/logs, restic repositories, or raw backup archive files.
+
+Create a SQLite-safe staging snapshot with `scripts/stage.sh --keep`.
+
+`stage.sh` consumes the same manifests, preserves the live relative path structure under a unique directory in `~/.local/state/hermes-backup/staging/`, copies non-SQLite payloads with `rsync`, and stages SQLite candidates with `sqlite3 .backup` followed by `PRAGMA integrity_check`. To keep live paths read/copy-only, it refuses WAL-mode SQLite sources before opening them because a read-only SQLite connection can create or modify source-side `-wal`/`-shm` files; those databases require a later quiesce/snapshot strategy. By default, successful transient staging is removed; `--keep` preserves it for a downstream backup command or investigation. The command writes `staging-metadata.json` with manifest paths/checksums, source roots, skipped paths, and counts, but never file contents or secret values.
 
 Collocation baseline:
 
