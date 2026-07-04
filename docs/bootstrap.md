@@ -13,6 +13,26 @@ A downstream `bootstrap` command should:
 5. Initialize or verify the restic repository.
 6. Run first-use verification before enabling timers.
 
+## Dependency preflight
+
+Run the offline preflight before collecting secrets or installing/enabling timers:
+
+```bash
+scripts/preflight.sh --check
+```
+
+The preflight checks local runtime assumptions only. It does not install packages, prompt for secrets, read secret files, call Backblaze B2, call restic repositories, or send Telegram messages.
+
+Required local tools:
+
+- `restic`
+- `sqlite3`
+- `rsync`
+- `curl`
+- user-level `systemd` via `systemctl --user`
+
+If a tool is missing, install it from Danny's local shell using the normal Ubuntu package path or the tool vendor's documented install path. Do not paste B2 keys, restic passwords, Telegram bot tokens, or other credentials into chat, issues, PRs, or committed files.
+
 ## Secret handling contract
 
 - Never ask Danny to paste credentials into chat, PRs, issues, docs, or committed files.
