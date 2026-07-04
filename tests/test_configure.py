@@ -146,6 +146,33 @@ def test_configure_refuses_symlinked_path_into_repository(tmp_path):
     assert not (ROOT / "config" / "symlink-local-test-config").exists()
 
 
+def test_configure_rejects_existing_output_directory_before_prompt(tmp_path):
+    home = tmp_path / "home"
+    config_dir = tmp_path / "xdg" / "hermes-backup"
+    bad_env = config_dir / "hermes-backup.env"
+    bad_env.mkdir(parents=True)
+    env = os.environ.copy()
+    env.update(DUMMY_ENV)
+    env.update({"HOME": str(home), "XDG_CONFIG_HOME": str(tmp_path / "xdg")})
+    home.mkdir()
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "--config-dir", str(config_dir), "--non-interactive"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    output = combined_output(result)
+    assert "local env file exists but is not a regular file" in output
+    for value in DUMMY_ENV.values():
+        assert value not in output
+    assert not (config_dir / "restic-password").exists()
+
+
 def test_configure_rejects_relative_config_dir(tmp_path):
     result, _ = run_configure(
         tmp_path,
