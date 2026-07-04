@@ -2,6 +2,18 @@
 
 This document defines the bootstrap contract for the foundation implementation tickets. The current slice adds the safe one-command install skeleton, local config/secret prompt writer, and offline preflight composition. It does not install packages, enable timers, initialize restic, call B2/Telegram, or run backup/restore behavior.
 
+## Required offline verification harness
+
+Run this command before every foundation-bootstrap PR handoff:
+
+```bash
+scripts/check.sh
+```
+
+The harness verifies bootstrap/config safety without live secrets or live backup operations. It runs Bash syntax checks, pytest coverage for missing-tool and successful fixture preflight behavior, local config permission/write behavior, install orchestration, no secret/log leakage, no Hermes cron scheduling, and no user systemd timer enablement side effects. It also fails if a local-secret/runtime-output ignore rule accidentally matches a tracked file.
+
+Future backup/check/restore tickets should extend the nearest owning test file or add a focused sibling test file instead of creating a separate harness.
+
 ## One-command install skeleton
 
 Run the bootstrap skeleton from a local terminal on the VM:

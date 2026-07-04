@@ -47,6 +47,16 @@ Collocation baseline:
 - Move shared shell helpers under `lib/hermes-backup/` only after at least two commands reuse them; avoid catch-all `helpers` or `utils` buckets.
 - Keep tests and fixtures nearest to the behavior they verify.
 
+## Required offline verification
+
+Every foundation-bootstrap PR must include this command as reviewer evidence:
+
+```bash
+scripts/check.sh
+```
+
+The harness is offline-only. It runs shell syntax checks, pytest coverage for preflight/config/install safety, and a Git ignored-file guard. It must not call B2, restic repositories, Telegram, Hermes cron, or `systemctl --user enable/start`.
+
 ## Stress-friendly bootstrap checklist
 
 This foundation slice provides a safe one-command skeleton:

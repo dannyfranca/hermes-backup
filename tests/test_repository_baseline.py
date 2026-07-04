@@ -25,11 +25,43 @@ def test_required_foundation_files_exist():
         "SECURITY.md",
         "docs/bootstrap.md",
         "config/hermes-backup.env.example",
+        "scripts/check.sh",
         "systemd/user/hermes-backup-backup.service",
         "systemd/user/hermes-backup-backup.timer",
     ]
     missing = [name for name in required if not (ROOT / name).is_file()]
     assert missing == []
+
+
+def test_foundation_verification_command_is_documented():
+    for path in [ROOT / "README.md", ROOT / "docs" / "bootstrap.md"]:
+        text = path.read_text()
+        assert "scripts/check.sh" in text
+        assert "foundation-bootstrap" in text
+        assert "offline" in text.lower()
+
+
+def test_local_secret_and_runtime_outputs_are_git_ignored():
+    local_only_paths = [
+        "config/hermes-backup.env",
+        "config/restic-password",
+        "config/test.local",
+        "logs/bootstrap.log",
+        "staging/sample.db-backup",
+        "restore/hermes-vm-backup/latest/file.txt",
+        "archives/hermes-backup.tar",
+        ".review/state.json",
+    ]
+    result = subprocess.run(
+        ["git", "check-ignore", *local_only_paths],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    ignored = set(result.stdout.splitlines())
+    assert ignored == set(local_only_paths)
 
 
 def test_gitignore_blocks_local_secrets_and_outputs():
