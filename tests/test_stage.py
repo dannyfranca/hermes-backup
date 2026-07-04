@@ -151,6 +151,18 @@ def assert_no_secrets(output: str) -> None:
         assert value not in output
 
 
+def sidecar_state(db: Path) -> dict[str, tuple[int, int, int] | None]:
+    state = {}
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = db.with_name(db.name + suffix)
+        if sidecar.exists():
+            stat_result = sidecar.stat()
+            state[suffix] = (stat_result.st_size, stat_result.st_mtime_ns, stat_result.st_mode)
+        else:
+            state[suffix] = None
+    return state
+
+
 def test_stage_has_valid_bash_syntax_and_is_executable():
     result = subprocess.run(["bash", "-n", str(SCRIPT)], cwd=ROOT, text=True, capture_output=True, check=False)
     assert result.returncode == 0, combined(result)
@@ -191,6 +203,32 @@ def test_stage_default_cleanup_removes_successful_transient_staging(tmp_path):
     staging_root = staging_root_from(output)
     assert not staging_root.exists()
     assert f"cleanup=removed staging_root={staging_root}" in output
+    assert_no_secrets(output)
+
+
+def test_stage_refuses_wal_mode_sqlite_without_source_sidecar_effects(tmp_path):
+    root = fixture_root(tmp_path)
+    db = root / "home/agent/.hermes/kanban.db"
+    db.unlink()
+    conn = sqlite3.connect(db)
+    assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() == "wal"
+    conn.execute("create table tasks(id text primary key, title text)")
+    conn.execute("insert into tasks values ('t_wal', 'WAL fixture')")
+    conn.commit()
+    conn.close()
+    for suffix in ("-wal", "-shm", "-journal"):
+        db.with_name(db.name + suffix).unlink(missing_ok=True)
+    assert db.read_bytes()[18:20] == b"\x02\x02"
+    before = sidecar_state(db)
+
+    result = run_stage(tmp_path, "--keep", root=root)
+    output = combined(result)
+
+    assert result.returncode != 0
+    assert "refusing to open WAL-mode SQLite source without quiesce/snapshot" in output
+    assert "/home/agent/.hermes/kanban.db" in output
+    assert sidecar_state(db) == before == {"-wal": None, "-shm": None, "-journal": None}
+    assert "sqlite path=/home/agent/.hermes/kanban.db status=backed-up" not in output
     assert_no_secrets(output)
 
 

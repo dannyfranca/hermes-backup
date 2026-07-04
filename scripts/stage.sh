@@ -165,6 +165,12 @@ has_sqlite_header() {
   LC_ALL=C head -c 15 -- "$fs_path" 2>/dev/null | LC_ALL=C grep -aq '^SQLite format 3'
 }
 
+is_sqlite_wal_mode() {
+  local fs_path=$1 first_byte second_byte
+  read -r first_byte second_byte _ < <(LC_ALL=C od -An -tu1 -j 18 -N 2 -- "$fs_path" 2>/dev/null || true)
+  [[ "$first_byte" == "2" || "$second_byte" == "2" ]]
+}
+
 relative_without_leading_slash() {
   local live_path=$1
   printf '%s\n' "${live_path#/}"
@@ -305,6 +311,9 @@ for live_root in "${includes[@]}"; do
       non_sqlite_candidates+=("$live_candidate")
       log "sqlite-candidate path=$live_candidate status=not-sqlite-copied-raw"
       continue
+    fi
+    if is_sqlite_wal_mode "$candidate"; then
+      fail "refusing to open WAL-mode SQLite source without quiesce/snapshot: $live_candidate"
     fi
     rm -f -- "$dest_db" "$dest_db-wal" "$dest_db-shm" "$dest_db-journal"
     if ! sqlite3 -readonly "$candidate" ".backup '$dest_db'" >/dev/null 2>&1; then
