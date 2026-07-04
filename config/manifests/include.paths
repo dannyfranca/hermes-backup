@@ -1,0 +1,8 @@
+# hermes-backup include manifest
+# Source of truth for live paths that backup staging may consider.
+# Lines are absolute VM paths. Blank lines and comments are ignored.
+/home/agent/.hermes
+/home/agent/shared
+/home/agent/shared-assets
+/home/agent/.config/systemd/user
+/home/agent/.config/containers/systemd

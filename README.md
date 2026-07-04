@@ -33,12 +33,27 @@ Excluded state:
 ## Repository structure
 
 ```text
-config/        Placeholder-only config examples and future include/exclude manifests.
+config/        Placeholder-only config examples and include/exclude manifests.
 docs/          Bootstrap and recovery documentation.
 scripts/       User-facing offline/runtime checks and future VM commands.
 systemd/user/  Inert source templates for user systemd services/timers.
 tests/         Offline tests for repository contracts and safety checks.
 ```
+
+## Backup scope manifests and dry-run inventory
+
+The staging scope is versioned under `config/manifests/`:
+
+- `include.paths` is the source of truth for live paths backup staging may consider.
+- `exclude.patterns` is the source of truth for forbidden classes that must never enter staging.
+
+Run the offline inventory dry-run before staging/restic work:
+
+```bash
+scripts/inventory-dry-run.sh
+```
+
+The command prints only path/count/status output. It does not print file contents, secrets, B2 keys, restic passwords, Telegram tokens, or backup archives. It exits non-zero if an included tree contains a forbidden class such as Honcho, Git/worktrees, dependency folders, caches/build outputs, model/media paths, Proxmox paths, runtime staging/logs, restic repositories, or raw backup archive files.
 
 Collocation baseline:
 

@@ -1,0 +1,45 @@
+# hermes-backup exclude manifest
+# Source of truth for classes that must never enter backup staging.
+# Format: shell-style absolute path pattern, optional whitespace, # reason.
+/home/agent/.hermes/honcho/**                # Honcho data/config is out of scope
+/home/agent/.honcho/**                       # Honcho data/config is out of scope
+/home/agent/git/**                           # Git repos and worktrees are rebuildable
+/home/agent/**/.git/**                       # Embedded Git metadata must not be staged
+/home/agent/**/worktrees/**                  # Task worktrees are rebuildable
+/home/agent/**/node_modules/**               # Dependency directories are rebuildable
+/home/agent/**/.venv/**                      # Python virtualenvs are rebuildable
+/home/agent/**/venv/**                       # Python virtualenvs are rebuildable
+/home/agent/**/__pycache__/**                # Python bytecode caches are rebuildable
+/home/agent/**/.cache/**                     # Caches are rebuildable
+/home/agent/**/cache/**                      # Caches are rebuildable
+/home/agent/**/.mypy_cache/**                # Generated type-check caches are rebuildable
+/home/agent/**/.pytest_cache/**              # Generated test caches are rebuildable
+/home/agent/**/.ruff_cache/**                # Generated lint caches are rebuildable
+/home/agent/**/restic-cache/**               # Restic cache directories are rebuildable
+/home/agent/**/dist/**                       # Build outputs are rebuildable
+/home/agent/**/build/**                      # Build outputs are rebuildable
+/home/agent/**/models/**                     # Model downloads are out of scope
+/home/agent/**/model-cache/**                # Model downloads are out of scope
+/home/agent/media/**                         # Media libraries are out of scope
+/home/agent/**/media/**                      # Media libraries are out of scope
+/var/lib/vz/**                               # Proxmox-level backup automation is out of scope
+/etc/pve/**                                  # Proxmox-level backup automation is out of scope
+/home/agent/**/staging/**                   # Runtime staging directories must not be staged recursively
+/home/agent/**/logs/**                      # Runtime logs stay local and are not backup payload
+/home/agent/.local/state/hermes-backup/staging/** # Runtime staging output must not be staged recursively
+/home/agent/.local/state/hermes-backup/logs/**    # Runtime logs stay local and are not backup payload
+/home/agent/**/restic-repo/**                # Local restic repositories are not backup payload
+/home/agent/**/*.restic                      # Local restic repository files/dirs are not backup payload
+/home/agent/**/*.restic/**                   # Local restic repositories are not backup payload
+/home/agent/**/archives/**                   # Raw backup archive directories must not be staged
+/home/agent/**/backups/**                    # Raw backup output directories must not be staged
+/home/agent/**/*.db-backup                   # Raw database backup artifacts must not be staged
+/home/agent/**/*.sqlite-backup               # Raw database backup artifacts must not be staged
+/home/agent/**/*.sqlite3-backup              # Raw database backup artifacts must not be staged
+/home/agent/**/*.tar                         # Raw backup archives must not be committed or staged
+/home/agent/**/*.tar.*                       # Compressed raw backup archives must not be committed or staged
+/home/agent/**/*.tar.gz                      # Raw backup archives must not be committed or staged
+/home/agent/**/*.tgz                         # Raw backup archives must not be committed or staged
+/home/agent/**/*.zip                         # Raw backup archives must not be committed or staged
+/home/agent/**/*.7z                          # Raw backup archives must not be committed or staged
+/home/agent/**/*.log                         # Runtime log files stay local and are not backup payload
