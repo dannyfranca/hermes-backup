@@ -47,6 +47,32 @@ Collocation baseline:
 - Move shared shell helpers under `lib/hermes-backup/` only after at least two commands reuse them; avoid catch-all `helpers` or `utils` buckets.
 - Keep tests and fixtures nearest to the behavior they verify.
 
+## Stress-friendly bootstrap checklist
+
+This foundation slice provides a safe one-command skeleton:
+
+```bash
+./install.sh
+```
+
+What it does now:
+
+1. Runs `scripts/preflight.sh --check` before any secret prompt.
+2. Creates local state/log/staging directories under `~/.local/state/hermes-backup/`, a safe restore directory at `~/restore/hermes-vm-backup/`, and local inert systemd template copies.
+3. Runs `scripts/configure.sh` to prompt locally for B2, restic, and raw Telegram Bot API values.
+4. Writes local-only config under `~/.config/hermes-backup/` with owner-only permissions.
+5. Confirms backup execution is not implemented/active and no timers were enabled.
+
+What is intentionally not active yet:
+
+- No backup, check, restore, promote, or drill command is implemented or run.
+- No restic repository is initialized.
+- No B2, restic, or Telegram network validation is run.
+- No user systemd service/timer is enabled or started.
+- No Hermes cron scheduling is used.
+
+Downstream tickets own real backup/check/drill behavior, raw Telegram alerts, first-run verification, and user systemd timer enablement.
+
 ## Current status
 
-This foundation slice establishes repo structure, docs, ignore rules, placeholder config, inert systemd templates, safety tests, and the offline preflight contract at `scripts/preflight.sh --check`. This repo now also includes `scripts/configure.sh`, a local-only config/secret prompt writer that creates owner-only config files outside Git. Backup, check, restore, promote, bootstrap install orchestration, Telegram delivery, and live timer enablement remain downstream work.
+This foundation slice establishes repo structure, docs, ignore rules, placeholder config, inert systemd templates, safety tests, the offline preflight contract at `scripts/preflight.sh --check`, the local config/secret prompt writer at `scripts/configure.sh`, and the bootstrap skeleton at `./install.sh`. Backup, check, restore, promote, Telegram delivery, restic initialization, and live timer enablement remain downstream work.

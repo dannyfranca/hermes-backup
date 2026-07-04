@@ -1,6 +1,48 @@
 # Bootstrap baseline
 
-This document defines the bootstrap contract for the foundation implementation tickets. The current slice adds only the local config/secret prompt writer; it does not install packages, enable timers, initialize restic, or run backup/restore behavior.
+This document defines the bootstrap contract for the foundation implementation tickets. The current slice adds the safe one-command install skeleton, local config/secret prompt writer, and offline preflight composition. It does not install packages, enable timers, initialize restic, call B2/Telegram, or run backup/restore behavior.
+
+## One-command install skeleton
+
+Run the bootstrap skeleton from a local terminal on the VM:
+
+```bash
+./install.sh
+```
+
+The skeleton runs in this order:
+
+1. `scripts/preflight.sh --check` before any secret prompt.
+2. Local state/log/staging, safe restore, and inert systemd template setup.
+3. `scripts/configure.sh` only after preflight and local path setup pass.
+4. Final inert-scope confirmation; no backup/check/restore/timer action is run.
+
+Default local paths:
+
+```text
+~/.config/hermes-backup/hermes-backup.env
+~/.config/hermes-backup/restic-password
+~/.config/hermes-backup/systemd-templates/
+~/.local/state/hermes-backup/logs/
+~/.local/state/hermes-backup/staging/
+~/restore/hermes-vm-backup/
+```
+
+The bootstrap output prints paths and next-step caveats only. It must not print B2 keys, restic passwords, Telegram bot tokens, or other secret values.
+
+For tests or disposable automation only, `./install.sh` passes through non-interactive dummy values to `scripts/configure.sh`:
+
+```bash
+B2_ACCOUNT_ID=... \
+B2_ACCOUNT_KEY=... \
+RESTIC_REPOSITORY=... \
+RESTIC_PASSWORD=... \
+TELEGRAM_BOT_TOKEN=... \
+TELEGRAM_CHAT_ID=... \
+./install.sh --config-dir /absolute/test/config/dir --non-interactive
+```
+
+Use obvious dummy values in non-interactive mode. Do not pass real secrets through chat, CI logs, shell history, GitHub, or committed files.
 
 ## Local config writer
 
@@ -44,13 +86,13 @@ Use obvious dummy values in non-interactive mode. Do not pass real secrets throu
 
 ## Future bootstrap goals
 
-A downstream `bootstrap` command should:
+Downstream tickets should extend this skeleton only after the backing behavior exists:
 
-1. Verify or install required local tools: `restic`, `sqlite3`, `rsync`, and `curl`.
-2. Call or reuse this config writer instead of reimplementing secret collection.
-3. Install user systemd service/timer units from inert repo templates.
-4. Initialize or verify the restic repository.
-5. Run first-use verification before enabling timers.
+1. Install missing required local tools when explicitly approved.
+2. Convert inert templates into concrete user systemd service/timer units.
+3. Initialize or verify the restic repository.
+4. Run first-use backup/check/Telegram verification.
+5. Enable user systemd timers only after first-use verification passes.
 
 ## Dependency preflight
 
