@@ -237,6 +237,8 @@ test ! -e "$RESTORE_DIR/home/agent/git"
 test ! -e "$RESTORE_DIR/home/agent/.cache"
 ```
 
+Review restored symlinks before promote. The promote dry-run now prints `symlink_audit_link ... status=ok` lines for harmless relative links, `symlink_audit_systemd_wants ... status=expected` for normal user-systemd enablement links, one `symlink_audit ...` count line for each included root, and a final `symlink_audit_summary`. Normal user-systemd enablement links under `/home/agent/.config/systemd/user/*.wants/` or `*.requires/` are expected and are not defects. Treat non-systemd `symlink_audit_issue ... reason=absolute-target` or `reason=parent-escape` lines as a stop-and-inspect warning before live promote.
+
 ## 6. Explicit live promote workflow
 
 Promote only after the safe restore has been inspected and Hermes activity is quiesced.
@@ -247,7 +249,10 @@ Promote only after the safe restore has been inspected and Hermes activity is qu
    scripts/promote.sh --dry-run "$RESTORE_DIR"
    ```
 
-2. Read the planned live replacements, pre-promotion backup path, and `quiesce ...` lines. The dry-run is non-mutating: it must not stop services, copy files, or create the pre-promotion backup directory.
+2. Read the planned live replacements, pre-promotion backup path, `symlink_audit ...` lines, and `quiesce ...` lines. The dry-run is non-mutating: it must not stop services, copy files, or create the pre-promotion backup directory.
+   - Verify the `symlink_audit_summary symlinks=... systemd_wants=... warnings=0` line reports zero warnings for a clean restore.
+   - `symlink_audit_systemd_wants ... status=expected` is normal for enabled user services/timers.
+   - `symlink_audit_issue ... reason=absolute-target` or `reason=parent-escape` means inspect the named restored symlink before promote; do not blanket-delete all symlinks and do not follow/dereference symlink targets during promote.
 3. Stop or account for active Hermes activity before the confirmed promote:
    - `hermes-gateway.service` and `hermes-dashboard.service` are the reviewed service allowlist that `promote.sh` may stop automatically in confirmed mode.
    - Any other active `hermes*.service`, Hermes gateway/dashboard/Kanban process, or unavailable service/process probe requires operator review. Stop it manually when appropriate.
