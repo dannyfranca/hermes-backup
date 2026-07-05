@@ -24,7 +24,13 @@ def combined(result) -> str:
     return result.stdout + result.stderr
 
 
-def write_local_config(tmp_path: Path, *, mode_bits: int = 0o600, restore_dir: Path | None = None) -> tuple[Path, Path]:
+def write_local_config(
+    tmp_path: Path,
+    *,
+    mode_bits: int = 0o600,
+    restore_dir: Path | None = None,
+    restore_host: str | None = "agent-test-host",
+) -> tuple[Path, Path]:
     config_dir = tmp_path / "config"
     config_dir.mkdir(mode=0o700, parents=True)
     password_file = config_dir / "restic-password"
@@ -40,6 +46,7 @@ def write_local_config(tmp_path: Path, *, mode_bits: int = 0o600, restore_dir: P
                 f"RESTIC_PASSWORD_FILE={shlex.quote(str(password_file))}",
                 f"TELEGRAM_BOT_TOKEN={shlex.quote(DUMMY_ENV['TELEGRAM_BOT_TOKEN'])}",
                 *( [f"HERMES_BACKUP_RESTORE_DIR={shlex.quote(str(restore_dir))}"] if restore_dir is not None else [] ),
+                *( [f"HERMES_BACKUP_RESTORE_HOST={shlex.quote(restore_host)}"] if restore_host is not None else [] ),
                 "",
             ]
         )
@@ -132,7 +139,8 @@ def test_restore_latest_defaults_to_non_live_safe_restore_root_and_verifies_path
     assert result.returncode == 0, output
     assert_no_secret_values(output)
     target = target_from_output(output)
-    assert target == tmp_path / "home" / "agent" / "restore" / "hermes-vm-backup" / "latest"
+    assert target.parent == tmp_path / "home" / "agent" / "restore" / "hermes-vm-backup"
+    assert re.fullmatch(r"latest-\d{8}T\d{6}Z(?:-\d+)?", target.name)
     marker = target / ".hermes-backup-restore.json"
     assert marker.is_file()
     marker_text = marker.read_text()
@@ -146,11 +154,53 @@ def test_restore_latest_defaults_to_non_live_safe_restore_root_and_verifies_path
 
     log = log_file.read_text().splitlines()
     restore_args = log[0].split(" ", 1)[1].split("\0")
-    assert restore_args == ["restore", "latest", "--tag", "hermes-vm-backup", "--target", str(target / ".restic-restore-raw")]
+    assert restore_args == [
+        "restore",
+        "latest",
+        "--tag",
+        "hermes-vm-backup",
+        "--host",
+        "agent-test-host",
+        "--target",
+        str(target / ".restic-restore-raw"),
+    ]
     assert "B2_ACCOUNT_KEY=set" in log[1]
     assert "RESTIC_PASSWORD_FILE=set" in log[1]
     assert "RESTIC_PASSWORD=missing" in log[1]
     assert "RESTIC_PASSWORD_COMMAND=missing" in log[1]
+
+
+def test_restore_latest_default_target_is_repeatable_without_manual_cleanup(tmp_path):
+    restore_dir = tmp_path / "repeatable-restore-root"
+
+    first, first_log = run_restore(tmp_path / "first-run", restore_dir=restore_dir)
+    second, second_log = run_restore(tmp_path / "second-run", restore_dir=restore_dir)
+    first_output = combined(first)
+    second_output = combined(second)
+
+    assert first.returncode == 0, first_output
+    assert second.returncode == 0, second_output
+    first_target = target_from_output(first_output)
+    second_target = target_from_output(second_output)
+    assert first_target.parent == restore_dir
+    assert second_target.parent == restore_dir
+    assert first_target != second_target
+    assert first_target.is_dir()
+    assert second_target.is_dir()
+    assert first_log.exists()
+    assert second_log.exists()
+    assert_no_secret_values(first_output)
+    assert_no_secret_values(second_output)
+
+
+def test_restore_refuses_empty_explicit_latest_host(tmp_path):
+    result, log_file = run_restore(tmp_path, "--host", "")
+    output = combined(result)
+
+    assert result.returncode != 0
+    assert "--host must not be empty" in output
+    assert not log_file.exists()
+    assert_no_secret_values(output)
 
 
 def test_restore_explicit_snapshot_defaults_to_snapshot_named_safe_directory(tmp_path):
@@ -261,7 +311,9 @@ def test_restore_honors_configured_restore_dir_by_default(tmp_path):
     output = combined(result)
 
     assert result.returncode == 0, output
-    assert target_from_output(output) == configured_restore_dir / "latest"
+    target = target_from_output(output)
+    assert target.parent == configured_restore_dir
+    assert re.fullmatch(r"latest-\d{8}T\d{6}Z(?:-\d+)?", target.name)
     assert_no_secret_values(output)
 
 
