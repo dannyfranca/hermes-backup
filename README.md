@@ -85,7 +85,18 @@ scripts/restore.sh
 
 By default the restore target is `~/restore/hermes-vm-backup/latest`. If local config sets `HERMES_BACKUP_RESTORE_DIR`, that directory becomes the default restore root; `HERMES_BACKUP_ENV` is honored the same way as `backup.sh`. Pass `--snapshot <snapshot-id>` to restore into `<restore-root>/<snapshot-id>`, or pass `--target <absolute-path>` for a custom inspection directory. `restore.sh` refuses destinations that equal, sit inside, or parent-overlap configured live include paths such as `/home/agent/.hermes`, `/home/agent/shared`, `/home/agent/shared-assets`, `/home/agent/.config/systemd/user`, and `/home/agent/.config/containers/systemd`.
 
-The command loads the already-created local restic/B2 config, runs `restic restore` for the stable `hermes-vm-backup` tag when selecting `latest`, flattens the staged backup layout into the inspection directory, then prints a compact verification summary for the expected include roots. It does not promote restored files, overwrite live Hermes/shared/systemd/Quadlet paths, print secret values, or implement the later explicit live promote/drill workflows.
+The command loads the already-created local restic/B2 config, runs `restic restore` for the stable `hermes-vm-backup` tag when selecting `latest`, flattens the staged backup layout into the inspection directory, writes a non-secret `.hermes-backup-restore.json` provenance marker for the later explicit promote command, then prints a compact verification summary for the expected include roots. It does not promote restored files, overwrite live Hermes/shared/systemd/Quadlet paths, print secret values, or implement the later drill workflow.
+
+## Explicit live promote command
+
+After inspecting a safe restore directory, promote it with an explicit guarded command:
+
+```bash
+scripts/promote.sh --dry-run ~/restore/hermes-vm-backup/latest
+scripts/promote.sh --yes --confirm PROMOTE-HERMES-RESTORE ~/restore/hermes-vm-backup/latest
+```
+
+`promote.sh` is intentionally separate from `restore.sh`; install, restore, timers, and future drill paths must not call it automatically. The command requires an absolute restore directory with the non-secret `.hermes-backup-restore.json` marker written by `restore.sh`, requires the expected restored include roots, refuses restore paths that overlap configured live include paths, and refuses symlinked restore/live path components. Dry-run mode prints the planned backup/promote actions without changing live paths. Confirmed mode optionally stops active known user services with `systemctl --user`, creates a unique local pre-promotion backup under `~/.local/state/hermes-backup/pre-promotion-backups/<timestamp>.<suffix>/`, replaces the configured live include roots from the inspected restore output, reloads user systemd state, and prints a checklist for Hermes profiles, shared outputs, shared-assets, systemd user units, and Quadlets. It prints paths/status only; it never prints B2 keys, restic passwords, Telegram credentials, file contents, or backup archives.
 
 Collocation baseline:
 
@@ -124,13 +135,14 @@ What is intentionally not active yet:
 
 - `install.sh` does not run backup, check, restore, promote, or drill commands.
 - `scripts/restore.sh` is available as a manual, safe, non-live restore command; install does not run it.
+- `scripts/promote.sh` is available only as a manual explicit live promote command; install, restore, check, timers, and drill paths do not run it automatically.
 - No restic repository is initialized by install.
 - No B2, restic, or Telegram network validation is run by install.
 - No user systemd service/timer is enabled or started.
 - No Hermes cron scheduling is used.
 
-Downstream tickets own drill behavior, explicit live promote, raw Telegram alerts, first-run verification, and user systemd timer enablement.
+Downstream tickets own drill behavior, raw Telegram alerts, first-run verification, and user systemd timer enablement.
 
 ## Current status
 
-This foundation, backup, safe-restore, and check slice establishes repo structure, docs, ignore rules, placeholder config, inert systemd templates, safety tests, the offline preflight contract at `scripts/preflight.sh --check`, the local config/secret prompt writer at `scripts/configure.sh`, the bootstrap skeleton at `./install.sh`, SQLite-safe staging at `scripts/stage.sh`, the manual restic backup/retention command at `scripts/backup.sh`, the manual restic repository health check at `scripts/restic-check.sh`, and the manual non-live restore command at `scripts/restore.sh`. Promote, Telegram delivery, restic initialization, live timer enablement, and restore drills remain downstream work.
+This foundation, backup, safe-restore, check, and promote slice establishes repo structure, docs, ignore rules, placeholder config, inert systemd templates, safety tests, the offline preflight contract at `scripts/preflight.sh --check`, the local config/secret prompt writer at `scripts/configure.sh`, the bootstrap skeleton at `./install.sh`, SQLite-safe staging at `scripts/stage.sh`, the manual restic backup/retention command at `scripts/backup.sh`, the manual restic repository health check at `scripts/restic-check.sh`, the manual non-live restore command at `scripts/restore.sh`, and the manual explicit live promote command at `scripts/promote.sh`. Telegram delivery, restic initialization, live timer enablement, and restore drills remain downstream work.
