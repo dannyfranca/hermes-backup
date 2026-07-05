@@ -73,7 +73,31 @@ Run a repository health check after local config is created:
 scripts/restic-check.sh
 ```
 
-`restic-check.sh` validates the same local chmod-600 env file and restic password file, runs `restic check` against the configured repository, appends a redacted daily local log under `HERMES_BACKUP_LOG_DIR` (default `~/.local/state/hermes-backup/logs/`), keeps successful checks quiet in Telegram, and sends one compact raw Telegram Bot API alert when `restic check` fails and local Telegram config is available. Exit code `0` means the check passed, `64` means local config is missing or unsafe, `127` means `restic` is unavailable, and any other non-zero exit is the propagated `restic check` failure. Failure output is redacted for B2 keys, restic password-file paths, repository URLs, Telegram credentials, file contents, backup archives, Authorization-like values, and credential-looking strings. It does not implement systemd timers, restore, promote, or drill behavior.
+`restic-check.sh` validates the same local chmod-600 env file and restic password file, runs `restic check` against the configured repository, appends a redacted daily local log under `HERMES_BACKUP_LOG_DIR` (default `~/.local/state/hermes-backup/logs/`), keeps successful checks quiet in Telegram, and sends one compact raw Telegram Bot API alert when `restic check` fails and local Telegram config is available. Exit code `0` means the check passed, `64` means local config is missing or unsafe, `127` means `restic` is unavailable, and any other non-zero exit is the propagated `restic check` failure. Failure output is redacted for B2 keys, restic password-file paths, repository URLs, Telegram credentials, file contents, backup archives, Authorization-like values, and credential-looking strings. It does not implement restore, promote, or drill behavior.
+
+## User systemd backup/check timers
+
+`./install.sh` renders the versioned templates in `systemd/user/` into the user's systemd unit directory, defaulting to `~/.config/systemd/user/`, then runs `systemctl --user daemon-reload`. The rendered services call only the approved repo commands:
+
+- `hermes-backup-backup.service` -> `scripts/backup.sh`
+- `hermes-backup-check.service` -> `scripts/restic-check.sh`
+
+The timers are user-level systemd timers, not Hermes cron:
+
+- `hermes-backup-backup.timer`: daily at about 03:30 with a 30 minute randomized delay.
+- `hermes-backup-check.timer`: weekly on Sunday at about 08:30 with a 45 minute randomized delay.
+
+Install is idempotent. It reuses an existing local `~/.config/hermes-backup/hermes-backup.env` plus `restic-password` when both are present with `0600` permissions, and it rewrites unit files from templates. By default it does not enable timers; after local verification, enable through the same install-time verification gate with:
+
+```bash
+./install.sh --enable-timers
+systemctl --user list-timers --all 'hermes-backup-*'
+systemctl --user status hermes-backup-backup.timer hermes-backup-check.timer
+```
+
+The gate runs `systemctl --user enable` without `--now` so install does not immediately start persistent timers or dispatch missed backup/check runs. If Danny wants timers active immediately in the current user manager session, he can start the timer units manually after accepting any systemd catch-up behavior.
+
+The installer never runs backup, check, restore, promote, drill, restic init, B2/Telegram network validation, or Hermes cron scheduling. Monthly restore-drill scheduling remains owned by the restore-drill-runbook bundle after its drill command is reviewed.
 
 ## Safe restore command
 
@@ -132,10 +156,11 @@ This foundation slice provides a safe one-command skeleton:
 What it does now:
 
 1. Runs `scripts/preflight.sh --check` before any secret prompt.
-2. Creates local state/log/staging directories under `~/.local/state/hermes-backup/`, a safe restore directory at `~/restore/hermes-vm-backup/`, and local inert systemd template copies.
-3. Runs `scripts/configure.sh` to prompt locally for B2, restic, and raw Telegram Bot API values.
-4. Writes local-only config under `~/.config/hermes-backup/` with owner-only permissions.
-5. Leaves backup execution manual for this slice and does not enable timers.
+2. Creates local state/log/staging directories under `~/.local/state/hermes-backup/`, a safe restore directory at `~/restore/hermes-vm-backup/`, and the user systemd unit directory.
+3. Runs `scripts/configure.sh` to prompt locally for B2, restic, and raw Telegram Bot API values when local config does not already exist.
+4. Writes or reuses local-only config under `~/.config/hermes-backup/` with owner-only permissions.
+5. Renders backup/check systemd user units into `~/.config/systemd/user/` and runs `systemctl --user daemon-reload`.
+6. Leaves timers disabled by default; `./install.sh --enable-timers` enables only the backup/check timers after local scheduler verification.
 
 What is intentionally not active yet:
 
@@ -144,11 +169,11 @@ What is intentionally not active yet:
 - `scripts/promote.sh` is available only as a manual explicit live promote command; install, restore, check, timers, and drill paths do not run it automatically.
 - No restic repository is initialized by install.
 - No B2, restic, or Telegram network validation is run by install.
-- No user systemd service/timer is enabled or started.
 - No Hermes cron scheduling is used.
+- No restore-drill timer is installed or enabled by this slice.
 
-Downstream tickets own user systemd timer enablement and end-to-end drill safety harness expansion.
+Downstream tickets own first-run repository verification, restore-drill timer enablement, and broader end-to-end drill safety harness expansion.
 
 ## Current status
 
-This foundation, backup, safe-restore, check, promote, alert, and drill-reporting slice establishes repo structure, docs, ignore rules, placeholder config, inert systemd templates, safety tests, the offline preflight contract at `scripts/preflight.sh --check`, the local config/secret prompt writer at `scripts/configure.sh`, the bootstrap skeleton at `./install.sh`, SQLite-safe staging at `scripts/stage.sh`, the manual restic backup/retention command at `scripts/backup.sh`, the manual restic repository health check at `scripts/restic-check.sh`, shared redacted local log/raw Telegram helpers under `lib/hermes-backup/log-alert.sh`, the manual non-live restore command at `scripts/restore.sh`, the manual explicit live promote command at `scripts/promote.sh`, and the manual safe monthly restore drill command at `scripts/restore-drill.sh`. Restic initialization, live timer enablement, and broader end-to-end safety harness work remain downstream.
+This foundation, backup, safe-restore, check, promote, alert, drill-reporting, and scheduler slice establishes repo structure, docs, ignore rules, placeholder config, backup/check systemd user templates, safety tests, the offline preflight contract at `scripts/preflight.sh --check`, the local config/secret prompt writer at `scripts/configure.sh`, the bootstrap/systemd installer at `./install.sh`, SQLite-safe staging at `scripts/stage.sh`, the manual restic backup/retention command at `scripts/backup.sh`, the manual restic repository health check at `scripts/restic-check.sh`, shared redacted local log/raw Telegram helpers under `lib/hermes-backup/log-alert.sh`, the manual non-live restore command at `scripts/restore.sh`, the manual explicit live promote command at `scripts/promote.sh`, and the manual safe monthly restore drill command at `scripts/restore-drill.sh`. Restic initialization, current-session timer start, restore-drill timer enablement, and broader end-to-end safety harness work remain downstream.

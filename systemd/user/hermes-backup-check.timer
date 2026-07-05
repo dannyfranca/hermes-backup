@@ -1,0 +1,14 @@
+# Source template rendered by install.sh into the user's systemd unit dir.
+# User-level systemd timers are required; Hermes cron must not schedule checks.
+
+[Unit]
+Description=Weekly Hermes VM restic check timer
+
+[Timer]
+OnCalendar=Sun *-*-* 08:30:00
+Persistent=true
+RandomizedDelaySec=45m
+Unit=hermes-backup-check.service
+
+[Install]
+WantedBy=timers.target

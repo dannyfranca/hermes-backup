@@ -1,6 +1,6 @@
 # Bootstrap baseline
 
-This document defines the bootstrap contract for the foundation implementation tickets. The current slice adds the safe one-command install skeleton, local config/secret prompt writer, and offline preflight composition. It does not install packages, enable timers, initialize restic, call B2/Telegram, or run backup/restore behavior.
+This document defines the bootstrap contract for the foundation implementation tickets. The current slice adds the safe one-command install skeleton, local config/secret prompt writer, offline preflight composition, and backup/check user systemd unit rendering. Timers are disabled by default; `./install.sh --enable-timers` enables only the backup/check timer symlinks through the same verification gate, without `--now`. It does not install packages, initialize restic, call B2/Telegram, run backup/restore behavior, or enable restore-drill scheduling.
 
 ## Required offline verification harness
 
@@ -25,16 +25,20 @@ Run the bootstrap skeleton from a local terminal on the VM:
 The skeleton runs in this order:
 
 1. `scripts/preflight.sh --check` before any secret prompt.
-2. Local state/log/staging, safe restore, and inert systemd template setup.
-3. `scripts/configure.sh` only after preflight and local path setup pass.
-4. Final inert-scope confirmation; no backup/check/restore/timer action is run by install.
+2. Local state/log/staging, safe restore, and systemd user unit directory setup.
+3. `scripts/configure.sh` only when local config files do not already exist; otherwise reuse the existing chmod-600 local config.
+4. Render backup/check unit files from `systemd/user/` into `~/.config/systemd/user/` and run `systemctl --user daemon-reload`.
+5. Leave timers disabled by default, or enable only the backup/check timers when `--enable-timers` is passed after local scheduler verification.
 
 Default local paths:
 
 ```text
 ~/.config/hermes-backup/hermes-backup.env
 ~/.config/hermes-backup/restic-password
-~/.config/hermes-backup/systemd-templates/
+~/.config/systemd/user/hermes-backup-backup.service
+~/.config/systemd/user/hermes-backup-backup.timer
+~/.config/systemd/user/hermes-backup-check.service
+~/.config/systemd/user/hermes-backup-check.timer
 ~/.local/state/hermes-backup/logs/
 ~/.local/state/hermes-backup/staging/
 ~/restore/hermes-vm-backup/
@@ -96,15 +100,15 @@ scripts/configure.sh --config-dir /absolute/test/config/dir --non-interactive
 
 Use obvious dummy values in non-interactive mode. Do not pass real secrets through chat, CI logs, shell history, GitHub, or committed files.
 
-## Future bootstrap goals
+## Remaining bootstrap goals
 
-Downstream tickets should extend this skeleton only after the backing behavior exists:
+This slice now renders concrete backup/check user systemd units and can enable those timer symlinks through `./install.sh --enable-timers`. Downstream tickets should extend bootstrap only after the backing behavior exists:
 
 1. Install missing required local tools when explicitly approved.
-2. Convert inert templates into concrete user systemd service/timer units.
-3. Initialize or verify the restic repository.
-4. Run first-use backup/check/Telegram verification.
-5. Enable user systemd timers only after first-use verification passes.
+2. Initialize or verify the restic repository.
+3. Run first-use backup/check/Telegram verification.
+4. Activate timer units in the current user manager session only after first-use verification and operator acceptance of systemd persistent catch-up behavior.
+5. Add restore-drill command/timer wiring after the restore-drill-runbook bundle provides a reviewed drill command.
 
 ## Dependency preflight
 
@@ -146,7 +150,26 @@ Those paths are examples of where local state lives. They are generated locally 
 
 Backup, check, and restore-drill scheduling must use user-level systemd timers. Do not use Hermes cron for this project because backups must keep running when Hermes itself is unhealthy.
 
-Systemd files in `systemd/user/` are source templates only until a downstream installer writes concrete local units.
+This slice renders and installs only the reviewed backup/check units:
+
+```text
+~/.config/systemd/user/hermes-backup-backup.service
+~/.config/systemd/user/hermes-backup-backup.timer
+~/.config/systemd/user/hermes-backup-check.service
+~/.config/systemd/user/hermes-backup-check.timer
+```
+
+Use these manual checks after install:
+
+```bash
+systemctl --user status hermes-backup-backup.timer hermes-backup-check.timer
+systemctl --user list-timers --all 'hermes-backup-*'
+systemctl --user status hermes-backup-backup.service hermes-backup-check.service
+```
+
+Timers are not enabled by default. `./install.sh --enable-timers` enables only the backup/check timer units through the same local unit/config verification gate. It intentionally uses `systemctl --user enable` without `--now`, so install does not start persistent timers or dispatch missed backup/check runs. `--enable-timers` cannot be combined with `--systemd-user-dir`; custom unit dirs are for tests/staging renders only, so enablement always targets the default user manager path.
+
+The monthly restore-drill command/timer is intentionally deferred to the restore-drill-runbook bundle. Do not enable a drill timer until that command exists and has been reviewed.
 
 ## Downstream behavior not implemented here
 
@@ -154,5 +177,4 @@ Systemd files in `systemd/user/` are source templates only until a downstream in
 - `install.sh` does not run backup/check/restore/promote/drill commands.
 - No package installation.
 - No network validation against B2, restic, or Telegram.
-- No timer enablement.
 - No restic repository initialization.
