@@ -59,6 +59,14 @@ Create a SQLite-safe staging snapshot with `scripts/stage.sh --keep`.
 
 `stage.sh` consumes the same manifests, preserves the live relative path structure under a unique directory in `~/.local/state/hermes-backup/staging/`, copies non-SQLite payloads with `rsync`, and stages SQLite candidates with `sqlite3 .backup` followed by `PRAGMA integrity_check`. To keep live paths read/copy-only, it refuses WAL-mode SQLite sources before opening them because a read-only SQLite connection can create or modify source-side `-wal`/`-shm` files; those databases require a later quiesce/snapshot strategy. By default, successful transient staging is removed; `--keep` preserves it for a downstream backup command or investigation. The command writes `staging-metadata.json` with manifest paths/checksums, source roots, skipped paths, and counts, but never file contents or secret values.
 
+Run the restic backup and retention flow after local config is created:
+
+```bash
+scripts/backup.sh
+```
+
+`backup.sh` validates the local chmod-600 env file and restic password file, runs `stage.sh --keep`, points `restic backup` only at the staging root, tags snapshots with stable `hermes-vm-backup`, and runs `restic forget --tag hermes-vm-backup --group-by host,tags --keep-daily 7 --keep-weekly 8 --keep-monthly 12 --keep-yearly 2 --prune` only after a successful backup. The stable tag/grouping keeps retention meaningful even though staging paths rotate every run. It prints status, the staging root, and the snapshot id when available; it does not print B2 keys, restic passwords, Telegram credentials, file contents, or backup archives. It is intentionally limited to backup plus retention/prune; check, alerting, timers, restore, promote, and drill behavior remain downstream tickets.
+
 Collocation baseline:
 
 - Keep one user-facing command per file under `scripts/` when downstream tickets add executable behavior.
@@ -90,18 +98,18 @@ What it does now:
 2. Creates local state/log/staging directories under `~/.local/state/hermes-backup/`, a safe restore directory at `~/restore/hermes-vm-backup/`, and local inert systemd template copies.
 3. Runs `scripts/configure.sh` to prompt locally for B2, restic, and raw Telegram Bot API values.
 4. Writes local-only config under `~/.config/hermes-backup/` with owner-only permissions.
-5. Confirms backup execution is not implemented/active and no timers were enabled.
+5. Leaves backup execution manual for this slice and does not enable timers.
 
 What is intentionally not active yet:
 
-- No backup, check, restore, promote, or drill command is implemented or run.
-- No restic repository is initialized.
-- No B2, restic, or Telegram network validation is run.
+- No check, restore, promote, or drill command is implemented or run.
+- No restic repository is initialized by install.
+- No B2, restic, or Telegram network validation is run by install.
 - No user systemd service/timer is enabled or started.
 - No Hermes cron scheduling is used.
 
-Downstream tickets own real backup/check/drill behavior, raw Telegram alerts, first-run verification, and user systemd timer enablement.
+Downstream tickets own check/drill behavior, raw Telegram alerts, first-run verification, and user systemd timer enablement.
 
 ## Current status
 
-This foundation slice establishes repo structure, docs, ignore rules, placeholder config, inert systemd templates, safety tests, the offline preflight contract at `scripts/preflight.sh --check`, the local config/secret prompt writer at `scripts/configure.sh`, and the bootstrap skeleton at `./install.sh`. Backup, check, restore, promote, Telegram delivery, restic initialization, and live timer enablement remain downstream work.
+This foundation and backup slice establishes repo structure, docs, ignore rules, placeholder config, inert systemd templates, safety tests, the offline preflight contract at `scripts/preflight.sh --check`, the local config/secret prompt writer at `scripts/configure.sh`, the bootstrap skeleton at `./install.sh`, SQLite-safe staging at `scripts/stage.sh`, and the manual restic backup/retention command at `scripts/backup.sh`. Check, restore, promote, Telegram delivery, restic initialization, live timer enablement, and restore drills remain downstream work.

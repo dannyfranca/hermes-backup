@@ -8,10 +8,10 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/check.sh [--pytest-args ...]
 
-Runs the offline bootstrap/config/staging verification harness:
+Runs the offline bootstrap/config/staging/backup verification harness:
   1. Bash syntax checks for install.sh and scripts/*.sh.
   2. A tracked-ignored-file guard so local-only secret/output files cannot become committed.
-  3. Pytest coverage for preflight, config writer, install skeleton, inventory, SQLite-safe staging, repo safety, and harness contracts.
+  3. Pytest coverage for preflight, config writer, install skeleton, inventory, SQLite-safe staging, restic backup/retention, repo safety, and harness contracts.
 
 This command does not call B2, restic repositories, Telegram, Hermes cron, or systemd enable/start.
 USAGE
