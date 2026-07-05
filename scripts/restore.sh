@@ -7,7 +7,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/restore.sh [--config-env PATH] [--snapshot SNAPSHOT_ID|latest] [--restore-root PATH] [--target PATH] [--manifest-dir PATH]
+Usage: scripts/restore.sh [--config-env PATH] [--snapshot SNAPSHOT_ID|latest] [--restore-root PATH] [--target PATH] [--host HOST] [--manifest-dir PATH]
 
 Runs the safe restore flow:
   1. Validate and load the local hermes-backup env file.
@@ -16,7 +16,13 @@ Runs the safe restore flow:
   4. Print a concise verification summary for expected Hermes/shared/systemd paths.
 
 Default target:
-  $HOME/restore/hermes-vm-backup/<snapshot-id-or-latest>
+  $HOME/restore/hermes-vm-backup/latest-<UTC timestamp>
+
+Latest host scope:
+  When --snapshot latest is selected, restore.sh filters restic by tag
+  hermes-vm-backup and by host. The host defaults to
+  HERMES_BACKUP_RESTORE_HOST from local config, or this machine's hostname.
+  Use --host HOST when restoring a snapshot produced by a different VM name.
 
 This command never promotes restored files into live Hermes state. Live replacement
 belongs to a later explicit promote command. It prints only paths/status counts;
@@ -35,6 +41,8 @@ CONFIG_ENV=""
 SNAPSHOT="latest"
 RESTORE_ROOT=""
 RESTORE_TARGET=""
+RESTORE_HOST=""
+HOST_EXPLICIT=0
 MANIFEST_DIR="$REPO_ROOT/config/manifests"
 TARGET_EXPLICIT=0
 RESTORE_ROOT_EXPLICIT=0
@@ -73,6 +81,12 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || fail "--target requires a path"
       RESTORE_TARGET=$2
       TARGET_EXPLICIT=1
+      shift 2
+      ;;
+    --host)
+      [[ $# -ge 2 ]] || fail "--host requires a value"
+      RESTORE_HOST=$2
+      HOST_EXPLICIT=1
       shift 2
       ;;
     --manifest-dir)
@@ -156,6 +170,24 @@ validate_snapshot_selector() {
   local snapshot=$1
   [[ "$snapshot" == "latest" || "$snapshot" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "snapshot must be 'latest' or a single safe snapshot id"
   [[ "$snapshot" != "." && "$snapshot" != ".." ]] || fail "snapshot must be 'latest' or a single safe snapshot id"
+}
+
+validate_host_selector() {
+  local host=$1
+  [[ "$host" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "host filter must be a single safe hostname"
+  [[ "$host" != "." && "$host" != ".." ]] || fail "host filter must be a single safe hostname"
+}
+
+latest_target_default() {
+  local root=$1 timestamp candidate index
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  candidate="$root/latest-$timestamp"
+  index=2
+  while [[ -e "$candidate" ]]; do
+    candidate="$root/latest-$timestamp-$index"
+    index=$((index + 1))
+  done
+  printf '%s\n' "$candidate"
 }
 
 check_restore_target_safety() {
@@ -242,7 +274,7 @@ source "$CONFIG_ENV_PATH" >/dev/null 2>&1 || exit 10
 { set +x; } 2>/dev/null || true
 unset BASH_XTRACEFD
 exec {xtrace_fd}>&-
-for name in B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE HERMES_BACKUP_RESTORE_DIR; do
+for name in B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE HERMES_BACKUP_RESTORE_DIR HERMES_BACKUP_RESTORE_HOST; do
   printf '%s=%q\n' "$name" "${!name-}"
 done
 BASH_LOAD_ENV
@@ -255,14 +287,27 @@ for required in B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_F
 done
 validate_secret_file "local restic password file" "$RESTIC_PASSWORD_FILE"
 unset RESTIC_PASSWORD RESTIC_PASSWORD_COMMAND
-export -n B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE HERMES_BACKUP_RESTORE_DIR 2>/dev/null || true
+export -n B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE HERMES_BACKUP_RESTORE_DIR HERMES_BACKUP_RESTORE_HOST 2>/dev/null || true
+
+if [[ "$SNAPSHOT" == "latest" ]]; then
+  if [[ "$HOST_EXPLICIT" -eq 1 ]]; then
+    [[ -n "$RESTORE_HOST" ]] || fail "--host must not be empty"
+  else
+    RESTORE_HOST=${HERMES_BACKUP_RESTORE_HOST:-$(hostname)}
+  fi
+  validate_host_selector "$RESTORE_HOST"
+fi
 
 if [[ "$RESTORE_ROOT_EXPLICIT" -eq 0 ]]; then
   RESTORE_ROOT=${HERMES_BACKUP_RESTORE_DIR:-$(restore_root_default)}
 fi
 case "$RESTORE_ROOT" in /*) ;; *) fail "--restore-root/HERMES_BACKUP_RESTORE_DIR must be an absolute path" ;; esac
 if [[ "$TARGET_EXPLICIT" -eq 0 ]]; then
-  RESTORE_TARGET="$RESTORE_ROOT/$SNAPSHOT"
+  if [[ "$SNAPSHOT" == "latest" ]]; then
+    RESTORE_TARGET="$(latest_target_default "$RESTORE_ROOT")"
+  else
+    RESTORE_TARGET="$RESTORE_ROOT/$SNAPSHOT"
+  fi
 fi
 case "$RESTORE_TARGET" in /*) ;; *) fail "--target must be an absolute path" ;; esac
 
@@ -279,6 +324,9 @@ RAW_RESTORE_TARGET="$RESTORE_TARGET/.restic-restore-raw"
 
 log "Hermes backup safe restore"
 log "snapshot=$SNAPSHOT"
+if [[ "$SNAPSHOT" == "latest" ]]; then
+  log "host_filter=$RESTORE_HOST"
+fi
 log "restore_target=$RESTORE_TARGET"
 log "manifest_dir=$MANIFEST_DIR"
 log "mode=non-live-inspection-only promote=false"
@@ -286,7 +334,7 @@ log "mode=non-live-inspection-only promote=false"
 mkdir -p -- "$RAW_RESTORE_TARGET"
 RESTIC_RESTORE_ARGS=(restore "$SNAPSHOT")
 if [[ "$SNAPSHOT" == "latest" ]]; then
-  RESTIC_RESTORE_ARGS+=(--tag hermes-vm-backup)
+  RESTIC_RESTORE_ARGS+=(--tag hermes-vm-backup --host "$RESTORE_HOST")
 fi
 RESTIC_RESTORE_ARGS+=(--target "$RAW_RESTORE_TARGET")
 restore_output="$(mktemp -t hermes-backup-restic-restore.XXXXXX)"

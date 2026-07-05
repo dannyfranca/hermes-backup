@@ -330,7 +330,8 @@ def test_end_to_end_fake_restore_drill_and_promote_safety_harness(tmp_path, requ
     restore_output = combined(restore)
     assert restore.returncode == 0, restore_output
     restore_target = target_from_restore_output(restore_output)
-    assert restore_target == Path(env["HOME"]) / "restore" / "hermes-vm-backup" / "latest"
+    assert restore_target.parent == Path(env["HOME"]) / "restore" / "hermes-vm-backup"
+    assert re.fullmatch(r"latest-\d{8}T\d{6}Z(?:-\d+)?", restore_target.name)
     assert "mode=non-live-inspection-only promote=false" in restore_output
     assert "No live Hermes/shared/systemd paths were promoted or overwritten." in restore_output
     assert snapshot_tree(live_paths) == live_tree_before
@@ -501,7 +502,7 @@ def test_end_to_end_fake_restore_drill_and_promote_safety_harness(tmp_path, requ
     assert_no_secret_values(drill_output + payload + daily_logs[0].read_text())
 
     restic_text = restic_log.read_text()
-    assert "ARGS restore\0latest\0--tag\0hermes-vm-backup\0--target" in restic_text
+    assert "ARGS restore\0latest\0--tag\0hermes-vm-backup\0--host" in restic_text
     env_lines = [line for line in restic_text.splitlines() if line.startswith("ENV ")]
     assert env_lines
     assert all("RESTIC_PASSWORD=missing" in line for line in env_lines)

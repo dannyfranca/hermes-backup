@@ -38,24 +38,28 @@ Use this when the VM is broken and you need the shortest safe path.
    scripts/activate.sh --telegram-test --first-check
    ```
 
-8. Restore the latest backup into the safe, non-live restore directory:
+8. Restore the latest backup into a fresh timestamped safe, non-live restore directory. Run exactly one of these commands, then note the printed `restore_target=...` path as `RESTORE_DIR`:
 
    ```bash
+   # If the replacement VM hostname matches the backed-up VM:
    scripts/restore.sh
+
+   # If the replacement VM hostname differs from the backed-up VM:
+   scripts/restore.sh --host <source-host>
    ```
 
 9. Inspect the restore output and run the verification checklist below. Do not promote until the safe restore looks right.
 10. Dry-run the live promote and quiesce plan:
 
     ```bash
-    scripts/promote.sh --dry-run "$HOME/restore/hermes-vm-backup/latest"
+    scripts/promote.sh --dry-run "$RESTORE_DIR"
     ```
 
 11. Read the `quiesce ...` lines. If any non-reviewed Hermes service/process is active or a probe is unavailable, stop/account for it manually or proceed only with the explicit quiesce acknowledgement described in Section 6.
 12. If the dry-run and quiesce plan are correct, run the explicit promote command:
 
     ```bash
-    scripts/promote.sh --yes --confirm PROMOTE-HERMES-RESTORE "$HOME/restore/hermes-vm-backup/latest"
+    scripts/promote.sh --yes --confirm PROMOTE-HERMES-RESTORE "$RESTORE_DIR"
     ```
 
 13. Enable the approved backup/check/restore-drill user timers after restore/promote verification, or after Section 10 credential rotation if compromise is suspected. The activation gate requires a successful first backup/check in the same run before timer enablement and creates enabled symlinks without `--now`; start the timer units manually only if current-session scheduling is desired and systemd catch-up behavior is acceptable:
@@ -167,17 +171,21 @@ Normal restore is inspection-only and non-live.
    scripts/restic-check.sh
    ```
 
-2. Restore latest into the default safe target:
+2. Restore latest into a fresh timestamped safe target:
 
    ```bash
    scripts/restore.sh
    ```
 
-   Default target:
+   Default target shape:
 
    ```text
-   ~/restore/hermes-vm-backup/latest
+   ~/restore/hermes-vm-backup/latest-<UTC timestamp>
    ```
+
+   This default is repeatable: a second restore creates a new timestamped inspection directory instead of failing on the previous restore output. Note the printed `restore_target=...` value and use it as `RESTORE_DIR` for verification and promote dry-runs.
+
+   When selecting `latest`, `restore.sh` passes both `--tag hermes-vm-backup` and `--host <host>` to restic. The host defaults to `HERMES_BACKUP_RESTORE_HOST` from local config, or the current hostname when that variable is unset. If the replacement VM hostname differs from the backed-up VM, prefer the one-off `--host <source-host>` restore command. If you temporarily set `HERMES_BACKUP_RESTORE_HOST` in local config, remove it before enabling timers or relying on future restore drills so drills target the replacement VM's own backups.
 
 3. Or restore a specific snapshot into a separate safe target:
 
@@ -196,7 +204,7 @@ Run these checks against the restored directory before any promote command.
 Set the restored directory once:
 
 ```bash
-RESTORE_DIR="$HOME/restore/hermes-vm-backup/latest"
+RESTORE_DIR="<paste restore_target path printed by scripts/restore.sh>"
 ```
 
 Expected path checks:
@@ -348,7 +356,7 @@ Use this after setup and periodically after changes.
 - Bootstrap/config safety: `scripts/check.sh` and `scripts/preflight.sh --check` pass.
 - Backup path: `scripts/backup.sh` creates a tagged restic snapshot and keeps success quiet in Telegram.
 - Check path: `scripts/restic-check.sh` exits `0` for a healthy repository and sends one raw Telegram failure alert on simulated failure when local Telegram config exists.
-- Safe restore path: `scripts/restore.sh` restores into `~/restore/hermes-vm-backup/latest` or a snapshot-specific safe directory and prints expected include-root status.
+- Safe restore path: `scripts/restore.sh` restores latest into a fresh timestamped `~/restore/hermes-vm-backup/latest-*` directory, or restores a specific snapshot into a snapshot-specific safe directory, and prints expected include-root status with tag+host-scoped latest selection.
 - Promote path: `scripts/promote.sh --dry-run <restore-dir>` is reviewed before any `--yes --confirm PROMOTE-HERMES-RESTORE` run.
 - Activation/timer path: `scripts/activate.sh --init-restic --telegram-test --first-backup --first-check --enable-timers` is the full first-run setup sequence after `./install.sh`; timer enablement requires first backup/check verification and uses `systemctl --user enable` without `--now`. After a new user-manager activation or an explicit `systemctl --user start hermes-backup-*.timer`, `systemctl --user list-timers --all 'hermes-backup-*'` shows current-session schedules.
 - Drill path: `scripts/restore-drill.sh` verifies a safe drill restore, does not invoke promote, and raw Telegram delivery is proven by the message arriving or by `drill_report=sent transport=raw-telegram-api` in output/logs. Use `--keep-artifacts` only for manual inspection and delete retained artifacts promptly.

@@ -140,7 +140,9 @@ Restore the latest restic snapshot into the default non-live inspection director
 scripts/restore.sh
 ```
 
-By default the restore target is `~/restore/hermes-vm-backup/latest`. If local config sets `HERMES_BACKUP_RESTORE_DIR`, that directory becomes the default restore root; `HERMES_BACKUP_ENV` is honored the same way as `backup.sh`. Pass `--snapshot <snapshot-id>` to restore into `<restore-root>/<snapshot-id>`, or pass `--target <absolute-path>` for a custom inspection directory. `restore.sh` refuses destinations that equal, sit inside, or parent-overlap configured live include paths such as `/home/agent/.hermes`, `/home/agent/shared`, `/home/agent/shared-assets`, `/home/agent/.config/systemd/user`, and `/home/agent/.config/containers/systemd`.
+By default each `latest` restore target is a fresh timestamped directory such as `~/restore/hermes-vm-backup/latest-20260705T143000Z`; this makes repeated restore drills practical without manually deleting the previous inspection tree. If local config sets `HERMES_BACKUP_RESTORE_DIR`, that directory becomes the default restore root; `HERMES_BACKUP_ENV` is honored the same way as `backup.sh`. Pass `--snapshot <snapshot-id>` to restore into `<restore-root>/<snapshot-id>`, or pass `--target <absolute-path>` for a custom inspection directory. `restore.sh` refuses destinations that equal, sit inside, or parent-overlap configured live include paths such as `/home/agent/.hermes`, `/home/agent/shared`, `/home/agent/shared-assets`, `/home/agent/.config/systemd/user`, and `/home/agent/.config/containers/systemd`.
+
+When selecting `latest`, the command filters restic snapshots by both the stable `hermes-vm-backup` tag and a host filter. The host defaults to `HERMES_BACKUP_RESTORE_HOST` from local config when present, otherwise the current machine hostname; prefer the one-off `--host <source-host>` option if the replacement VM hostname differs from the host that created the backup. If `HERMES_BACKUP_RESTORE_HOST` is temporarily set in local config for recovery, remove it before enabling timers or relying on future restore drills so new drills target the replacement VM's own backups.
 
 The command loads the already-created local restic/B2 config, runs `restic restore` for the stable `hermes-vm-backup` tag when selecting `latest`, flattens the staged backup layout into the inspection directory, writes a non-secret `.hermes-backup-restore.json` provenance marker for the later explicit promote command, then prints a compact verification summary for the expected include roots. It does not promote restored files, overwrite live Hermes/shared/systemd/Quadlet paths, or print secret values.
 
@@ -155,8 +157,9 @@ By default drill artifacts are deleted after the report; pass `--keep-artifacts`
 After inspecting a safe restore directory, promote it with an explicit guarded command:
 
 ```bash
-scripts/promote.sh --dry-run ~/restore/hermes-vm-backup/latest
-scripts/promote.sh --yes --confirm PROMOTE-HERMES-RESTORE ~/restore/hermes-vm-backup/latest
+RESTORE_DIR="<paste restore_target path printed by scripts/restore.sh>"
+scripts/promote.sh --dry-run "$RESTORE_DIR"
+scripts/promote.sh --yes --confirm PROMOTE-HERMES-RESTORE "$RESTORE_DIR"
 ```
 
 `promote.sh` is intentionally separate from `restore.sh`; install, restore, timers, and future drill paths must not call it automatically. The command requires an absolute restore directory with the non-secret `.hermes-backup-restore.json` marker written by `restore.sh`, requires the expected restored include roots, refuses restore paths that overlap configured live include paths, and refuses symlinked restore/live path components. Dry-run mode prints the planned backup/promote actions plus a non-mutating Hermes quiesce plan. Confirmed mode may stop only the reviewed user-service allowlist (`hermes-gateway.service` and `hermes-dashboard.service`), requires manual review or `--quiesce-ack PROMOTE-HERMES-QUIESCE` for other active Hermes-like services/processes or unavailable probes, creates a unique local pre-promotion backup under `~/.local/state/hermes-backup/pre-promotion-backups/<timestamp>.<suffix>/`, replaces the configured live include roots from the inspected restore output, reloads user systemd state, and prints a checklist for Hermes profiles, shared outputs, shared-assets, systemd user units, and Quadlets. It prints paths/status only; it never prints B2 keys, restic passwords, Telegram credentials, file contents, or backup archives.
