@@ -65,7 +65,19 @@ Run the restic backup and retention flow after local config is created:
 scripts/backup.sh
 ```
 
-`backup.sh` validates the local chmod-600 env file and restic password file, runs `stage.sh --keep`, points `restic backup` only at the staging root, tags snapshots with stable `hermes-vm-backup`, and runs `restic forget --tag hermes-vm-backup --group-by host,tags --keep-daily 7 --keep-weekly 8 --keep-monthly 12 --keep-yearly 2 --prune` only after a successful backup. The stable tag/grouping keeps retention meaningful even though staging paths rotate every run. It prints status, the staging root, and the snapshot id when available; it does not print B2 keys, restic passwords, Telegram credentials, file contents, or backup archives. It is intentionally limited to backup plus retention/prune; check, alerting, timers, restore, promote, and drill behavior remain downstream tickets.
+`backup.sh` validates the local chmod-600 env file and restic password file, runs `stage.sh --keep`, points `restic backup` only at the staging root, tags snapshots with stable `hermes-vm-backup`, and runs `restic forget --tag hermes-vm-backup --group-by host,tags --keep-daily 7 --keep-weekly 8 --keep-monthly 12 --keep-yearly 2 --prune` only after a successful backup. The stable tag/grouping keeps retention meaningful even though staging paths rotate every run. It prints status, the staging root, and the snapshot id when available; it does not print B2 keys, restic passwords, Telegram credentials, file contents, or backup archives. It is intentionally limited to backup plus retention/prune; check, alerting, timers, promote, and drill behavior remain downstream tickets.
+
+## Safe restore command
+
+Restore the latest restic snapshot into the default non-live inspection directory:
+
+```bash
+scripts/restore.sh
+```
+
+By default the restore target is `~/restore/hermes-vm-backup/latest`. If local config sets `HERMES_BACKUP_RESTORE_DIR`, that directory becomes the default restore root; `HERMES_BACKUP_ENV` is honored the same way as `backup.sh`. Pass `--snapshot <snapshot-id>` to restore into `<restore-root>/<snapshot-id>`, or pass `--target <absolute-path>` for a custom inspection directory. `restore.sh` refuses destinations that equal, sit inside, or parent-overlap configured live include paths such as `/home/agent/.hermes`, `/home/agent/shared`, `/home/agent/shared-assets`, `/home/agent/.config/systemd/user`, and `/home/agent/.config/containers/systemd`.
+
+The command loads the already-created local restic/B2 config, runs `restic restore` for the stable `hermes-vm-backup` tag when selecting `latest`, flattens the staged backup layout into the inspection directory, then prints a compact verification summary for the expected include roots. It does not promote restored files, overwrite live Hermes/shared/systemd/Quadlet paths, print secret values, or implement the later explicit live promote/drill workflows.
 
 Collocation baseline:
 
@@ -102,14 +114,15 @@ What it does now:
 
 What is intentionally not active yet:
 
-- No check, restore, promote, or drill command is implemented or run.
+- No check, promote, or drill command is implemented or run.
+- `scripts/restore.sh` is available as a manual, safe, non-live restore command; install does not run it.
 - No restic repository is initialized by install.
 - No B2, restic, or Telegram network validation is run by install.
 - No user systemd service/timer is enabled or started.
 - No Hermes cron scheduling is used.
 
-Downstream tickets own check/drill behavior, raw Telegram alerts, first-run verification, and user systemd timer enablement.
+Downstream tickets own check/drill behavior, explicit live promote, raw Telegram alerts, first-run verification, and user systemd timer enablement.
 
 ## Current status
 
-This foundation and backup slice establishes repo structure, docs, ignore rules, placeholder config, inert systemd templates, safety tests, the offline preflight contract at `scripts/preflight.sh --check`, the local config/secret prompt writer at `scripts/configure.sh`, the bootstrap skeleton at `./install.sh`, SQLite-safe staging at `scripts/stage.sh`, and the manual restic backup/retention command at `scripts/backup.sh`. Check, restore, promote, Telegram delivery, restic initialization, live timer enablement, and restore drills remain downstream work.
+This foundation, backup, and safe-restore slice establishes repo structure, docs, ignore rules, placeholder config, inert systemd templates, safety tests, the offline preflight contract at `scripts/preflight.sh --check`, the local config/secret prompt writer at `scripts/configure.sh`, the bootstrap skeleton at `./install.sh`, SQLite-safe staging at `scripts/stage.sh`, the manual restic backup/retention command at `scripts/backup.sh`, and the manual non-live restore command at `scripts/restore.sh`. Check, promote, Telegram delivery, restic initialization, live timer enablement, and restore drills remain downstream work.
