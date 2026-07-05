@@ -2,7 +2,7 @@
 # Secrets stay in the local config file; this unit passes only its path to the script.
 
 [Unit]
-Description=Hermes VM backup to restic/B2
+Description=Hermes VM restic repository check
 Documentation=https://github.com/dannyfranca/hermes-backup
 Wants=network-online.target
 After=network-online.target
@@ -10,4 +10,4 @@ After=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=EXAMPLE_REPO_PATH
-ExecStart=EXAMPLE_REPO_PATH/scripts/backup.sh --config-env EXAMPLE_LOCAL_CONFIG_DIR/hermes-backup.env
+ExecStart=EXAMPLE_REPO_PATH/scripts/restic-check.sh --config-env EXAMPLE_LOCAL_CONFIG_DIR/hermes-backup.env

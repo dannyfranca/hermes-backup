@@ -1,11 +1,11 @@
-# Inert source template for future installer work.
+# Source template rendered by install.sh into the user's systemd unit dir.
 # User-level systemd timers are required; Hermes cron must not schedule backups.
 
 [Unit]
 Description=Daily Hermes VM backup timer
 
 [Timer]
-OnCalendar=daily
+OnCalendar=*-*-* 03:30:00
 Persistent=true
 RandomizedDelaySec=30m
 Unit=hermes-backup-backup.service
