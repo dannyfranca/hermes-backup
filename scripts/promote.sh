@@ -8,6 +8,7 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage: scripts/promote.sh [--manifest-dir PATH] [--live-root PATH] [--backup-root PATH] [--dry-run] [--quiesce-ack PROMOTE-HERMES-QUIESCE] [--yes --confirm PROMOTE-HERMES-RESTORE] RESTORE_DIR
+       scripts/promote.sh [--manifest-dir PATH] [--live-root PATH] [--quiesce-ack PROMOTE-HERMES-QUIESCE] --rollback PRE_PROMOTION_BACKUP_DIR --yes --confirm PROMOTE-HERMES-ROLLBACK
 
 Promotes an already-inspected safe restore directory into the live Hermes paths.
 This is the dangerous, explicit live replacement step; restore.sh never calls it.
@@ -20,6 +21,9 @@ Required guardrails:
   * Confirmed promote stops only reviewed Hermes user-service units.
   * If other active Hermes services/processes are detected, pass --quiesce-ack PROMOTE-HERMES-QUIESCE only after manually quiescing or accepting the risk.
   * A local pre-promotion backup is created before any live path is replaced.
+  * Confirmed promote writes a recovery checkpoint inside that backup directory.
+  * If promote is interrupted or fails after live replacement begins, rerun the
+    printed --rollback command after inspecting/quiescing the VM.
 
 Defaults:
   manifest dir: scripts/../config/manifests
@@ -34,6 +38,7 @@ USAGE
 log() { printf '%s\n' "$*"; }
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
 RESTORE_MARKER_NAME=".hermes-backup-restore.json"
+RECOVERY_CHECKPOINT_NAME=".hermes-backup-promote-recovery.tsv"
 # Reviewed, explicit allowlist: confirmed promote may stop only these user services.
 # Other Hermes-like services/processes are detected and surfaced for operator review,
 # but are never killed/stopped automatically by this script.
@@ -49,6 +54,7 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 MANIFEST_DIR="$REPO_ROOT/config/manifests"
 LIVE_ROOT="/"
 BACKUP_ROOT=""
+ROLLBACK_DIR=""
 DRY_RUN=0
 YES=0
 CONFIRM=""
@@ -113,11 +119,91 @@ copy_path_contents() {
   cp -a -- "$src" "$dst"
 }
 
+replace_path_contents() {
+  local src=$1 dst=$2 tmp
+  mkdir -p -- "$(dirname -- "$dst")"
+  tmp="$(mktemp -d "$(dirname -- "$dst")/.${dst##*/}.promote-copy.XXXXXX")"
+  rm -rf -- "$tmp"
+  cp -a -- "$src" "$tmp"
+  rm -rf -- "$dst"
+  mv -- "$tmp" "$dst"
+}
+
+shell_quote() {
+  printf '%q' "$1"
+}
+
+rollback_command() {
+  printf 'scripts/promote.sh --manifest-dir %s --live-root %s --rollback %s --yes --confirm PROMOTE-HERMES-ROLLBACK' \
+    "$(shell_quote "$MANIFEST_DIR")" "$(shell_quote "$LIVE_ROOT")" "$(shell_quote "$PROMOTION_BACKUP_DIR")"
+  if [[ -n "$QUIESCE_ACK" ]]; then
+    printf ' --quiesce-ack %s' "$(shell_quote "$QUIESCE_ACK")"
+  fi
+  printf '\n'
+}
+
+print_recovery_guidance() {
+  local reason=$1
+  if [[ -n "${PROMOTION_BACKUP_DIR:-}" && -f "$PROMOTION_BACKUP_DIR/$RECOVERY_CHECKPOINT_NAME" ]]; then
+    printf 'promote_recovery=available reason=%s backup_path=%s checkpoint=%s\n' "$reason" "$PROMOTION_BACKUP_DIR" "$PROMOTION_BACKUP_DIR/$RECOVERY_CHECKPOINT_NAME" >&2
+    printf 'promote_recovery_command=%s\n' "$(rollback_command)" >&2
+    printf 'promote_recovery_service_guidance=keep unintended services stopped until rollback or rerun-promote completes; then run systemctl --user daemon-reload and restart only reviewed services after inspection\n' >&2
+  else
+    printf 'promote_recovery=not-started reason=%s live_replacements_not_checkpointed=true\n' "$reason" >&2
+  fi
+}
+
+on_promote_exit() {
+  local status=$?
+  trap - EXIT INT TERM HUP
+  [[ "$status" -eq 0 ]] && return 0
+  case "${PROMOTE_PHASE:-}" in
+    backup) print_recovery_guidance "backup-failed-before-live-replacement" ;;
+    promote) print_recovery_guidance "promote-failed-or-interrupted" ;;
+  esac
+  exit "$status"
+}
+
+on_promote_signal() {
+  local signal=$1 status=1
+  trap - EXIT INT TERM HUP
+  case "$signal" in
+    HUP) status=129 ;;
+    INT) status=130 ;;
+    TERM) status=143 ;;
+  esac
+  case "${PROMOTE_PHASE:-}" in
+    backup) print_recovery_guidance "backup-interrupted-by-$signal-before-live-replacement" ;;
+    promote) print_recovery_guidance "promote-interrupted-by-$signal" ;;
+  esac
+  exit "$status"
+}
+
+write_recovery_checkpoint_header() {
+  local checkpoint=$1
+  : >"$checkpoint"
+  chmod 600 "$checkpoint" 2>/dev/null || true
+  printf '# hermes-backup promote recovery checkpoint v1\n' >>"$checkpoint"
+  printf '# status<TAB>live_path<TAB>backup_path\n' >>"$checkpoint"
+}
+
+record_recovery_checkpoint() {
+  local status=$1 live_path=$2 backup_target=$3 checkpoint=$4
+  printf '%s\t%s\t%s\n' "$status" "$live_path" "$backup_target" >>"$checkpoint"
+}
+
 validate_args() {
-  [[ -n "$RESTORE_DIR" ]] || fail "RESTORE_DIR is required; run restore.sh first, inspect the output, then pass that absolute path here"
-  case "$RESTORE_DIR" in /*) ;; *) fail "RESTORE_DIR must be an absolute path" ;; esac
   case "$MANIFEST_DIR" in /*) ;; *) fail "--manifest-dir must be an absolute path" ;; esac
   case "$LIVE_ROOT" in /*) ;; *) fail "--live-root must be an absolute path" ;; esac
+  if [[ -n "$ROLLBACK_DIR" ]]; then
+    [[ -z "$RESTORE_DIR" ]] || fail "--rollback cannot be combined with RESTORE_DIR"
+    case "$ROLLBACK_DIR" in /*) ;; *) fail "--rollback requires an absolute PRE_PROMOTION_BACKUP_DIR" ;; esac
+    [[ "$DRY_RUN" -eq 0 ]] || fail "--rollback does not support --dry-run; inspect the checkpoint manually instead"
+    [[ "$YES" -eq 1 && "$CONFIRM" == "PROMOTE-HERMES-ROLLBACK" ]] || fail "rollback requires --yes --confirm PROMOTE-HERMES-ROLLBACK"
+    return 0
+  fi
+  [[ -n "$RESTORE_DIR" ]] || fail "RESTORE_DIR is required; run restore.sh first, inspect the output, then pass that absolute path here"
+  case "$RESTORE_DIR" in /*) ;; *) fail "RESTORE_DIR must be an absolute path" ;; esac
   BACKUP_ROOT=${BACKUP_ROOT:-$(backup_root_default)}
   case "$BACKUP_ROOT" in /*) ;; *) fail "--backup-root must be an absolute path" ;; esac
   [[ "$DRY_RUN" -eq 1 || ( "$YES" -eq 1 && "$CONFIRM" == "PROMOTE-HERMES-RESTORE" ) ]] || fail "live promote requires --yes --confirm PROMOTE-HERMES-RESTORE, or use --dry-run"
@@ -335,6 +421,55 @@ maybe_reload_user_systemd() {
   fi
 }
 
+run_rollback() {
+  local checkpoint live_path backup_target status rel expected_backup live_target restored=0 removed=0
+  ROLLBACK_DIR="$(normalize_path "$ROLLBACK_DIR")"
+  LIVE_ROOT="$(normalize_path "$LIVE_ROOT")"
+  refuse_symlinked_path_components "rollback backup root" "$ROLLBACK_DIR"
+  [[ -d "$ROLLBACK_DIR" ]] || fail "rollback backup directory not found: $ROLLBACK_DIR"
+  checkpoint="$ROLLBACK_DIR/$RECOVERY_CHECKPOINT_NAME"
+  [[ ! -L "$checkpoint" ]] || fail "rollback checkpoint must not be a symlink: $checkpoint"
+  [[ -f "$checkpoint" ]] || fail "rollback checkpoint not found: $checkpoint"
+
+  log "Hermes backup explicit promote rollback"
+  log "rollback_backup=$ROLLBACK_DIR"
+  log "live_root=$LIVE_ROOT"
+  emit_quiesce_plan "pre-rollback"
+  require_nonreviewed_clear_or_ack
+  stop_reviewed_user_services
+  emit_quiesce_plan "post-reviewed-stop-rollback"
+  require_quiesce_clear_after_stop
+
+  while IFS=$'\t' read -r status live_path backup_target; do
+    [[ -n "${status:-}" ]] || continue
+    [[ "$status" != \#* ]] || continue
+    case "$live_path" in /*) ;; *) fail "rollback checkpoint live path must be absolute: $live_path" ;; esac
+    rel="$(relative_without_leading_slash "$live_path")"
+    expected_backup="$ROLLBACK_DIR/$rel"
+    [[ "$backup_target" == "$expected_backup" ]] || fail "rollback checkpoint backup path mismatch for $live_path"
+    live_target="$(join_live_root "$live_path")"
+    case "$status" in
+      present)
+        [[ -d "$backup_target" ]] || fail "rollback backup path missing for $live_path: $backup_target"
+        replace_path_contents "$backup_target" "$live_target"
+        log "rollback live_path=$live_path status=restored backup_path=$backup_target"
+        restored=$((restored + 1))
+        ;;
+      missing)
+        rm -rf -- "$live_target"
+        log "rollback live_path=$live_path status=removed-to-original-missing"
+        removed=$((removed + 1))
+        ;;
+      *) fail "rollback checkpoint has unknown status for $live_path: $status" ;;
+    esac
+  done <"$checkpoint"
+
+  maybe_reload_user_systemd
+  log "rollback=ok restored=$restored removed=$removed"
+  log "verification_checklist=inspect Hermes profiles, shared outputs, shared-assets, systemd user units, and Quadlets; restart only intended services after review"
+  log "No file contents, secrets, B2 keys, restic passwords, Telegram tokens, or backup archives were printed."
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --manifest-dir)
@@ -346,6 +481,9 @@ while [[ $# -gt 0 ]]; do
     --backup-root)
       [[ $# -ge 2 ]] || fail "--backup-root requires a path"
       BACKUP_ROOT=$2; shift 2 ;;
+    --rollback)
+      [[ $# -ge 2 ]] || fail "--rollback requires a pre-promotion backup directory"
+      ROLLBACK_DIR=$2; shift 2 ;;
     --dry-run)
       DRY_RUN=1; shift ;;
     --yes)
@@ -366,13 +504,17 @@ while [[ $# -gt 0 ]]; do
 done
 
 validate_args
-refuse_symlinked_path_components "RESTORE_DIR" "$RESTORE_DIR"
 refuse_symlinked_path_components "live root" "$LIVE_ROOT"
-refuse_symlinked_path_components "backup root" "$BACKUP_ROOT"
 INCLUDE_MANIFEST="$MANIFEST_DIR/include.paths"
 EXCLUDE_MANIFEST="$MANIFEST_DIR/exclude.patterns"
 [[ -f "$INCLUDE_MANIFEST" ]] || fail "include manifest not found: $INCLUDE_MANIFEST"
 [[ -f "$EXCLUDE_MANIFEST" ]] || fail "exclude manifest not found: $EXCLUDE_MANIFEST"
+if [[ -n "$ROLLBACK_DIR" ]]; then
+  run_rollback
+  exit 0
+fi
+refuse_symlinked_path_components "RESTORE_DIR" "$RESTORE_DIR"
+refuse_symlinked_path_components "backup root" "$BACKUP_ROOT"
 RESTORE_DIR="$(normalize_path "$RESTORE_DIR")"
 LIVE_ROOT="$(normalize_path "$LIVE_ROOT")"
 BACKUP_ROOT="$(normalize_path "$BACKUP_ROOT")"
@@ -430,6 +572,13 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 fi
 
 # Quiesce was checked and reviewed services were stopped before any live backup or promote mutation.
+CHECKPOINT_PATH="$PROMOTION_BACKUP_DIR/$RECOVERY_CHECKPOINT_NAME"
+write_recovery_checkpoint_header "$CHECKPOINT_PATH"
+trap on_promote_exit EXIT
+trap 'on_promote_signal HUP' HUP
+trap 'on_promote_signal INT' INT
+trap 'on_promote_signal TERM' TERM
+PROMOTE_PHASE=backup
 
 while IFS= read -r live_path; do
   rel="$(relative_without_leading_slash "$live_path")"
@@ -437,19 +586,27 @@ while IFS= read -r live_path; do
   backup_target="$PROMOTION_BACKUP_DIR/$rel"
   if [[ -e "$live_target" ]]; then
     copy_path_contents "$live_target" "$backup_target"
+    record_recovery_checkpoint "present" "$live_path" "$backup_target" "$CHECKPOINT_PATH"
     log "backup live_path=$live_path status=ok backup_path=$backup_target"
   else
+    record_recovery_checkpoint "missing" "$live_path" "$backup_target" "$CHECKPOINT_PATH"
     log "backup live_path=$live_path status=missing-live backup_path=$backup_target"
   fi
 done < <(read_manifest_lines "$INCLUDE_MANIFEST")
+
+log "promote_recovery_checkpoint=$CHECKPOINT_PATH"
+log "promote_recovery_command=$(rollback_command)"
+PROMOTE_PHASE=promote
 
 while IFS= read -r live_path; do
   rel="$(relative_without_leading_slash "$live_path")"
   restored_path="$RESTORE_DIR/$rel"
   live_target="$(join_live_root "$live_path")"
-  copy_path_contents "$restored_path" "$live_target"
+  replace_path_contents "$restored_path" "$live_target"
   log "promote live_path=$live_path status=ok restored_path=$restored_path"
 done < <(read_manifest_lines "$INCLUDE_MANIFEST")
+PROMOTE_PHASE=done
+trap - EXIT INT TERM HUP
 
 maybe_reload_user_systemd
 log "promote=ok"

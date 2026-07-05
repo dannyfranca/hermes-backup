@@ -219,6 +219,86 @@ def test_confirmed_promote_backs_up_before_replacing_and_reloads_systemd(tmp_pat
     assert "quiesce process_class=hermes-gateway pid=4321 command=hermes-gateway status=active action=covered-by-reviewed-service-stop" in output
     assert "--user stop hermes-gateway.service" in log.read_text() and "--user daemon-reload" in log.read_text()
 
+
+def test_promote_copy_failure_prints_checkpoint_and_rollback_restores_live_state(tmp_path):
+    live, restore, backup, man = fixture(tmp_path, ["/home/agent/.hermes", "/home/agent/shared"])
+    bin_dir, _, systemctl_env = fake_systemctl(tmp_path, active_units=[])
+    cp_log = tmp_path / "cp.log"
+    make_executable(
+        bin_dir / "cp",
+        "#!/usr/bin/env python3\n"
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        "Path(os.environ['FAKE_CP_LOG']).open('a').write('ARGS ' + '\\0'.join(sys.argv[1:]) + '\\n')\n"
+        "src = sys.argv[-2] if len(sys.argv) >= 3 else ''\n"
+        "if os.environ.get('FAKE_CP_FAIL_SRC') and os.environ['FAKE_CP_FAIL_SRC'] in src:\n"
+        "    print('fake cp interrupted during promote', file=sys.stderr)\n"
+        "    sys.exit(43)\n"
+        "os.execv('/usr/bin/cp', ['cp', *sys.argv[1:]])\n",
+    )
+    env = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH','')}",
+        **systemctl_env,
+        "FAKE_CP_LOG": str(cp_log),
+        "FAKE_CP_FAIL_SRC": str(restore / "home/agent/shared"),
+    }
+    failed = run(*args(live, backup, man, restore, "--yes", "--confirm", "PROMOTE-HERMES-RESTORE"), env=env)
+    failed_output = combined(failed)
+    assert failed.returncode != 0
+    assert "promote_recovery=available reason=promote-failed-or-interrupted" in failed_output
+    assert "promote_recovery_command=scripts/promote.sh" in failed_output
+    assert "--rollback" in failed_output and "PROMOTE-HERMES-ROLLBACK" in failed_output
+    assert "promote_recovery_service_guidance=" in failed_output
+    b = backup_dir(failed_output)
+    checkpoint = b / ".hermes-backup-promote-recovery.tsv"
+    assert checkpoint.exists()
+    assert "present\t/home/agent/.hermes\t" in checkpoint.read_text()
+    assert (live / "home/agent/.hermes/restored.txt").read_text().startswith("new 0")
+    assert (live / "home/agent/shared/current.txt").read_text().startswith("old 1")
+    no_secrets(failed_output)
+
+    rollback_env = {**env, "FAKE_CP_FAIL_SRC": ""}
+    rolled_back = run("--manifest-dir", man, "--live-root", live, "--rollback", b, "--yes", "--confirm", "PROMOTE-HERMES-ROLLBACK", env=rollback_env)
+    rollback_output = combined(rolled_back)
+    assert rolled_back.returncode == 0, rollback_output
+    assert "Hermes backup explicit promote rollback" in rollback_output
+    assert "rollback live_path=/home/agent/.hermes status=restored" in rollback_output
+    assert "rollback=ok restored=2 removed=0" in rollback_output
+    assert (live / "home/agent/.hermes/current.txt").read_text().startswith("old 0")
+    assert (live / "home/agent/shared/current.txt").read_text().startswith("old 1")
+    no_secrets(rollback_output)
+
+
+def test_promote_hup_after_checkpoint_prints_recovery_guidance(tmp_path):
+    live, restore, backup, man = fixture(tmp_path, ["/home/agent/.hermes", "/home/agent/shared"])
+    bin_dir, _, systemctl_env = fake_systemctl(tmp_path, active_units=[])
+    make_executable(
+        bin_dir / "cp",
+        "#!/usr/bin/env python3\n"
+        "import os, signal, sys, time\n"
+        "src = sys.argv[-2] if len(sys.argv) >= 3 else ''\n"
+        "if os.environ.get('FAKE_CP_HUP_SRC') and os.environ['FAKE_CP_HUP_SRC'] in src:\n"
+        "    os.kill(os.getppid(), signal.SIGHUP)\n"
+        "    time.sleep(0.2)\n"
+        "    sys.exit(129)\n"
+        "os.execv('/usr/bin/cp', ['cp', *sys.argv[1:]])\n",
+    )
+    env = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH','')}",
+        **systemctl_env,
+        "FAKE_CP_HUP_SRC": str(restore / "home/agent/shared"),
+    }
+    result = run(*args(live, backup, man, restore, "--yes", "--confirm", "PROMOTE-HERMES-RESTORE"), env=env)
+    output = combined(result)
+    assert result.returncode != 0
+    assert "promote_recovery=available reason=promote-interrupted-by-HUP" in output
+    assert "promote_recovery_command=scripts/promote.sh" in output
+    assert "--rollback" in output and "PROMOTE-HERMES-ROLLBACK" in output
+    assert (live / "home/agent/.hermes/restored.txt").read_text().startswith("new 0")
+    assert (live / "home/agent/shared/current.txt").read_text().startswith("old 1")
+    no_secrets(output)
+
+
 def test_dry_run_reports_quiesce_plan_without_stopping_services_or_mutating(tmp_path):
     live, restore, backup, man = fixture(tmp_path, ["/home/agent/.hermes"])
     bin_dir, log, systemctl_env = fake_systemctl(tmp_path, active_units=["hermes-gateway.service", "hermes-worker.service"])
