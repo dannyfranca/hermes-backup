@@ -5,6 +5,8 @@
 { set +x; } 2>/dev/null || true
 set -euo pipefail
 shopt -u extglob 2>/dev/null || true
+HERMES_BACKUP_ALERTS_ENABLED=0
+HERMES_BACKUP_FAILURE_RECORDED=0
 
 usage() {
   cat <<'USAGE'
@@ -28,10 +30,28 @@ USAGE
 }
 
 log() { printf '%s\n' "$*"; }
-fail_config() { printf 'error: %s\n' "$*" >&2; exit 64; }
-fail_dependency() { printf 'error: %s\n' "$*" >&2; exit 127; }
+fail_config() {
+  if [[ "${HERMES_BACKUP_ALERTS_ENABLED:-0}" == "1" && "${HERMES_BACKUP_FAILURE_RECORDED:-0}" != "1" ]] && declare -F hb_log_and_alert_failure >/dev/null 2>&1; then
+    hb_log_and_alert_failure "check" "64" "$*" || true
+  fi
+  printf 'error: %s\n' "$*" >&2
+  exit 64
+}
+fail_dependency() {
+  if [[ "${HERMES_BACKUP_ALERTS_ENABLED:-0}" == "1" && "${HERMES_BACKUP_FAILURE_RECORDED:-0}" != "1" ]] && declare -F hb_log_and_alert_failure >/dev/null 2>&1; then
+    hb_log_and_alert_failure "check" "127" "$*" || true
+  fi
+  printf 'error: %s\n' "$*" >&2
+  exit 127
+}
 
 CONFIG_ENV="${HERMES_BACKUP_ENV:-}"
+SCRIPT_SOURCE=${BASH_SOURCE[0]}
+case "$SCRIPT_SOURCE" in */*) SCRIPT_SOURCE=${SCRIPT_SOURCE%/*} ;; *) SCRIPT_SOURCE=. ;; esac
+SCRIPT_DIR="$(cd -- "$SCRIPT_SOURCE" && pwd -P)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+# shellcheck source=../lib/hermes-backup/log-alert.sh
+source "$REPO_ROOT/lib/hermes-backup/log-alert.sh"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -104,6 +124,9 @@ run_restic() {
   if [[ -n "${FAKE_RESTIC_STDERR_SECRET:-}" ]]; then
     restic_env+=("FAKE_RESTIC_STDERR_SECRET=$FAKE_RESTIC_STDERR_SECRET")
   fi
+  if [[ -n "${FAKE_RESTIC_PASSWORD_CONTENT:-}" ]]; then
+    restic_env+=("FAKE_RESTIC_PASSWORD_CONTENT=$FAKE_RESTIC_PASSWORD_CONTENT")
+  fi
   env -i "${restic_env[@]}" restic "$@"
 }
 
@@ -118,43 +141,8 @@ escape_glob_pattern() {
 }
 
 redact_line() {
-  local line=$1 pattern tmp_name tmp_value
-  local -a names=() values=()
-
-  if [[ -n "${RESTIC_PASSWORD_FILE:-}" ]]; then
-    names+=(RESTIC_PASSWORD_FILE); values+=("$RESTIC_PASSWORD_FILE")
-  fi
-  if [[ -n "${RESTIC_REPOSITORY:-}" ]]; then
-    names+=(RESTIC_REPOSITORY); values+=("$RESTIC_REPOSITORY")
-  fi
-  if [[ -n "${B2_ACCOUNT_KEY:-}" ]]; then
-    names+=(B2_ACCOUNT_KEY); values+=("$B2_ACCOUNT_KEY")
-  fi
-  if [[ -n "${B2_ACCOUNT_ID:-}" ]]; then
-    names+=(B2_ACCOUNT_ID); values+=("$B2_ACCOUNT_ID")
-  fi
-  if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
-    names+=(TELEGRAM_BOT_TOKEN); values+=("$TELEGRAM_BOT_TOKEN")
-  fi
-  if [[ -n "${TELEGRAM_CHAT_ID:-}" ]]; then
-    names+=(TELEGRAM_CHAT_ID); values+=("$TELEGRAM_CHAT_ID")
-  fi
-
-  local i j
-  for ((i = 0; i < ${#values[@]}; i++)); do
-    for ((j = i + 1; j < ${#values[@]}; j++)); do
-      if (( ${#values[j]} > ${#values[i]} )); then
-        tmp_value=${values[i]}; values[i]=${values[j]}; values[j]=$tmp_value
-        tmp_name=${names[i]}; names[i]=${names[j]}; names[j]=$tmp_name
-      fi
-    done
-  done
-
-  for ((i = 0; i < ${#values[@]}; i++)); do
-    pattern="$(escape_glob_pattern "${values[i]}")"
-    line=${line//$pattern/[redacted:${names[i]}]}
-  done
-  printf '%s\n' "$line"
+  local line=$1
+  hb_redact_line "$line"
 }
 
 redact_file() {
@@ -183,22 +171,32 @@ source "$CONFIG_ENV_PATH" >/dev/null 2>&1 || exit 10
 { set +x; } 2>/dev/null || true
 unset BASH_XTRACEFD
 exec {xtrace_fd}>&-
-for name in B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID; do
+for name in B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID HERMES_BACKUP_LOG_DIR; do
   printf '%s=%q\n' "$name" "${!name-}"
 done
 BASH_LOAD_ENV
 )" || fail_config "local env file could not be loaded: $CONFIG_ENV"
 eval "$loaded_env"
 unset loaded_env
+HERMES_BACKUP_ALERTS_ENABLED=1
+hb_setup_logging || true
 
 for required in B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE; do
   require_env "$required"
 done
 validate_restic_password_file "$RESTIC_PASSWORD_FILE"
+hb_setup_logging || fail_config "local log directory could not be prepared"
+if ! RESTIC_PASSWORD_VALUE="$(/usr/bin/cat -- "$RESTIC_PASSWORD_FILE" 2>/dev/null)"; then
+  hb_log_and_alert_failure "check" "64" "local restic password file could not be read"
+  fail_config "local restic password file could not be read"
+fi
 unset RESTIC_PASSWORD RESTIC_PASSWORD_COMMAND
-export -n B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE 2>/dev/null || true
+export -n B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE RESTIC_PASSWORD_VALUE HERMES_BACKUP_LOG_DIR TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID 2>/dev/null || true
 
-command -v restic >/dev/null 2>&1 || fail_dependency "restic is required for check"
+if ! command -v restic >/dev/null 2>&1; then
+  hb_log_and_alert_failure "check" "127" "restic is required for check"
+  fail_dependency "restic is required for check"
+fi
 
 log "Hermes backup restic check"
 log "config_env=$CONFIG_ENV"
@@ -215,10 +213,12 @@ if [[ "$check_rc" -ne 0 ]]; then
   printf 'restic_output=begin\n' >&2
   redact_file "$check_output" >&2
   printf 'restic_output=end\n' >&2
+  hb_log_and_alert_failure "check" "$check_rc" "restic check failed" "$check_output"
   rm -f -- "$check_output"
   exit "$check_rc"
 fi
 
 rm -f -- "$check_output"
 log "check=ok repository=configured"
+hb_log_success "check" "check=ok repository=configured"
 log "No B2 keys, restic passwords, Telegram tokens, repository URLs, file contents, or backup archives were printed."
