@@ -42,6 +42,7 @@ def write_local_config(tmp_path: Path, *, mode_bits: int = 0o600) -> tuple[Path,
                 f"RESTIC_REPOSITORY={shlex.quote(DUMMY_ENV['RESTIC_REPOSITORY'])}",
                 f"RESTIC_PASSWORD_FILE={shlex.quote(str(password_file))}",
                 f"TELEGRAM_BOT_TOKEN={shlex.quote(DUMMY_ENV['TELEGRAM_BOT_TOKEN'])}",
+                f"HERMES_BACKUP_LOG_DIR={shlex.quote(str(tmp_path / 'state' / 'hermes-backup' / 'logs'))}",
                 f"HERMES_BACKUP_STAGING_DIR={shlex.quote(str(tmp_path / 'state' / 'hermes-backup' / 'staging'))}",
                 "",
             ]

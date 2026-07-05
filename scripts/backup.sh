@@ -4,6 +4,8 @@
 # staging root, and runs retention pruning only after a successful backup.
 { set +x; } 2>/dev/null || true
 set -euo pipefail
+HERMES_BACKUP_ALERTS_ENABLED=0
+HERMES_BACKUP_FAILURE_RECORDED=0
 
 usage() {
   cat <<'USAGE'
@@ -21,10 +23,20 @@ USAGE
 }
 
 log() { printf '%s\n' "$*"; }
-fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
+fail() {
+  if [[ "${HERMES_BACKUP_ALERTS_ENABLED:-0}" == "1" && "${HERMES_BACKUP_FAILURE_RECORDED:-0}" != "1" ]] && declare -F hb_log_and_alert_failure >/dev/null 2>&1; then
+    hb_log_and_alert_failure "backup" "1" "$*" || true
+  fi
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+SCRIPT_SOURCE=${BASH_SOURCE[0]}
+case "$SCRIPT_SOURCE" in */*) SCRIPT_SOURCE=${SCRIPT_SOURCE%/*} ;; *) SCRIPT_SOURCE=. ;; esac
+SCRIPT_DIR="$(cd -- "$SCRIPT_SOURCE" && pwd -P)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+# shellcheck source=../lib/hermes-backup/log-alert.sh
+source "$REPO_ROOT/lib/hermes-backup/log-alert.sh"
 CONFIG_ENV="${HERMES_BACKUP_ENV:-${XDG_CONFIG_HOME:-$HOME/.config}/hermes-backup/hermes-backup.env}"
 ROOT_PREFIX=""
 MANIFEST_DIR=""
@@ -172,20 +184,27 @@ source "$CONFIG_ENV_PATH" >/dev/null 2>&1 || exit 10
 { set +x; } 2>/dev/null || true
 unset BASH_XTRACEFD
 exec {xtrace_fd}>&-
-for name in B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE HERMES_BACKUP_STAGING_DIR; do
+for name in B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE HERMES_BACKUP_STAGING_DIR HERMES_BACKUP_LOG_DIR TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID; do
   printf '%s=%q\n' "$name" "${!name-}"
 done
 BASH_LOAD_ENV
 )" || fail "local env file could not be loaded: $CONFIG_ENV"
 eval "$loaded_env"
 unset loaded_env
+HERMES_BACKUP_ALERTS_ENABLED=1
+hb_setup_logging || true
 
 for required in B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE; do
   require_env "$required"
 done
 validate_secret_file "local restic password file" "$RESTIC_PASSWORD_FILE"
+hb_setup_logging || fail "local log directory could not be prepared"
+if ! RESTIC_PASSWORD_VALUE="$(/usr/bin/cat -- "$RESTIC_PASSWORD_FILE" 2>/dev/null)"; then
+  hb_log_and_alert_failure "backup" "1" "local restic password file could not be read"
+  fail "local restic password file could not be read"
+fi
 unset RESTIC_PASSWORD RESTIC_PASSWORD_COMMAND
-export -n B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE HERMES_BACKUP_STAGING_DIR 2>/dev/null || true
+export -n B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE HERMES_BACKUP_STAGING_DIR HERMES_BACKUP_LOG_DIR TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID RESTIC_PASSWORD_VALUE 2>/dev/null || true
 if [[ -z "$STAGING_PARENT" && -n "${HERMES_BACKUP_STAGING_DIR:-}" ]]; then
   STAGING_PARENT=$HERMES_BACKUP_STAGING_DIR
 fi
@@ -195,7 +214,10 @@ if [[ -n "$ROOT_PREFIX" ]]; then
   ROOT_PREFIX="$(cd -- "$ROOT_PREFIX" && pwd -P)"
 fi
 
-command -v restic >/dev/null 2>&1 || fail "restic is required for backup"
+if ! command -v restic >/dev/null 2>&1; then
+  hb_log_and_alert_failure "backup" "127" "restic is required for backup"
+  fail "restic is required for backup"
+fi
 
 STAGE_ARGS=(--keep)
 if [[ -n "$ROOT_PREFIX" ]]; then STAGE_ARGS+=(--root "$ROOT_PREFIX"); fi
@@ -208,10 +230,14 @@ log "stage_command=scripts/stage.sh"
 log "retention=keep-daily:7 keep-weekly:8 keep-monthly:12 keep-yearly:2 prune:true group-by:host,tags tag:hermes-vm-backup"
 
 stage_output="$(mktemp -t hermes-backup-stage-output.XXXXXX)"
-if ! env -i PATH="$PATH" HOME="$HOME" bash "$SCRIPT_DIR/stage.sh" "${STAGE_ARGS[@]}" >"$stage_output" 2>&1; then
+set +e
+env -i PATH="$PATH" HOME="$HOME" bash "$SCRIPT_DIR/stage.sh" "${STAGE_ARGS[@]}" >"$stage_output" 2>&1
+stage_rc=$?
+set -e
+if [[ "$stage_rc" -ne 0 ]]; then
   failed_staging_root="$(parse_staging_root_from_output "$stage_output")"
-  sed -n '/^error:/p;/^cleanup=/p' "$stage_output" >&2 || true
-  rm -f -- "$stage_output"
+  sed -n '/^error:/p;/^cleanup=/p' "$stage_output" | while IFS= read -r line || [[ -n "$line" ]]; do hb_redact_line "$line"; done >&2 || true
+  hb_log_and_alert_failure "backup" "$stage_rc" "staging failed; restic backup was not run" "$stage_output"
   if [[ -n "$failed_staging_root" && -d "$failed_staging_root" ]]; then
     if is_under_configured_live_root "$failed_staging_root"; then
       remove_staging_root "$failed_staging_root"
@@ -221,20 +247,32 @@ if ! env -i PATH="$PATH" HOME="$HOME" bash "$SCRIPT_DIR/stage.sh" "${STAGE_ARGS[
       log "cleanup=removed-after-staging-failure staging_root=$failed_staging_root" >&2
     fi
   fi
-  fail "staging failed; restic backup was not run"
+  rm -f -- "$stage_output"
+  exit "$stage_rc"
 fi
 candidate_staging_root="$(parse_staging_root_from_output "$stage_output")"
 rm -f -- "$stage_output"
-[[ -n "$candidate_staging_root" && -d "$candidate_staging_root" ]] || fail "staging did not produce a usable staging root"
-case "$candidate_staging_root" in /*) ;; *) fail "staging root is not absolute" ;; esac
+if [[ -z "$candidate_staging_root" || ! -d "$candidate_staging_root" ]]; then
+  hb_log_and_alert_failure "backup" "1" "staging did not produce a usable staging root"
+  fail "staging did not produce a usable staging root"
+fi
+case "$candidate_staging_root" in
+  /*) ;;
+  *)
+    hb_log_and_alert_failure "backup" "1" "staging root is not absolute"
+    fail "staging root is not absolute"
+    ;;
+esac
 case "$candidate_staging_root" in
   /|/home|/home/agent|/home/agent/.hermes|/home/agent/shared|/home/agent/shared-assets|/home/agent/.config|/home/agent/.config/systemd/user|/home/agent/.config/containers/systemd)
+    hb_log_and_alert_failure "backup" "1" "refusing to point restic at a live source root: $candidate_staging_root"
     fail "refusing to point restic at a live source root: $candidate_staging_root"
     ;;
 esac
 if is_under_configured_live_root "$candidate_staging_root"; then
   remove_staging_root "$candidate_staging_root"
   log "cleanup=removed-unsafe-staging-root staging_root=$candidate_staging_root" >&2
+  hb_log_and_alert_failure "backup" "1" "refusing staging root inside configured live include root: $candidate_staging_root"
   fail "refusing staging root inside configured live include root: $candidate_staging_root"
 fi
 STAGING_ROOT=$candidate_staging_root
@@ -242,7 +280,12 @@ STAGING_ROOT=$candidate_staging_root
 log "staging_root=$STAGING_ROOT"
 
 backup_output="$(mktemp -t hermes-backup-restic-backup.XXXXXX)"
-if ! run_restic backup --json --tag hermes-vm-backup "$STAGING_ROOT" >"$backup_output" 2>&1; then
+set +e
+run_restic backup --json --tag hermes-vm-backup "$STAGING_ROOT" >"$backup_output" 2>&1
+backup_rc=$?
+set -e
+if [[ "$backup_rc" -ne 0 ]]; then
+  hb_log_and_alert_failure "backup" "$backup_rc" "restic backup failed; retention/prune was skipped" "$backup_output"
   rm -f -- "$backup_output"
   fail "restic backup failed; retention/prune was skipped"
 fi
@@ -255,10 +298,16 @@ else
 fi
 
 forget_output="$(mktemp -t hermes-backup-restic-forget.XXXXXX)"
-if ! run_restic forget --tag hermes-vm-backup --group-by host,tags --keep-daily 7 --keep-weekly 8 --keep-monthly 12 --keep-yearly 2 --prune >"$forget_output" 2>&1; then
+set +e
+run_restic forget --tag hermes-vm-backup --group-by host,tags --keep-daily 7 --keep-weekly 8 --keep-monthly 12 --keep-yearly 2 --prune >"$forget_output" 2>&1
+forget_rc=$?
+set -e
+if [[ "$forget_rc" -ne 0 ]]; then
+  hb_log_and_alert_failure "backup" "$forget_rc" "restic forget/prune failed after successful backup" "$forget_output"
   rm -f -- "$forget_output"
   fail "restic forget/prune failed after successful backup"
 fi
 rm -f -- "$forget_output"
 log "retention=ok tag=hermes-vm-backup group-by=host,tags keep-daily=7 keep-weekly=8 keep-monthly=12 keep-yearly=2 prune=ok"
+hb_log_success "backup" "backup=ok snapshot_id=${snapshot_id:-unavailable} retention=ok"
 log "No B2 keys, restic passwords, Telegram tokens, file contents, or backup archives were printed."

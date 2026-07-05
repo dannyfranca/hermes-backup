@@ -35,7 +35,7 @@ cd "$REPO_ROOT"
 
 log "Hermes backup foundation verification (offline)"
 log "Step 1/3: shell syntax"
-for shell_script in install.sh scripts/*.sh; do
+for shell_script in install.sh scripts/*.sh lib/hermes-backup/*.sh; do
   bash -n "$shell_script"
 done
 

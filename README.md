@@ -65,7 +65,7 @@ Run the restic backup and retention flow after local config is created:
 scripts/backup.sh
 ```
 
-`backup.sh` validates the local chmod-600 env file and restic password file, runs `stage.sh --keep`, points `restic backup` only at the staging root, tags snapshots with stable `hermes-vm-backup`, and runs `restic forget --tag hermes-vm-backup --group-by host,tags --keep-daily 7 --keep-weekly 8 --keep-monthly 12 --keep-yearly 2 --prune` only after a successful backup. The stable tag/grouping keeps retention meaningful even though staging paths rotate every run. It prints status, the staging root, and the snapshot id when available; it does not print B2 keys, restic passwords, Telegram credentials, file contents, or backup archives. It is intentionally limited to backup plus retention/prune; alerting, timers, promote, and drill behavior remain downstream tickets.
+`backup.sh` validates the local chmod-600 env file and restic password file, runs `stage.sh --keep`, points `restic backup` only at the staging root, tags snapshots with stable `hermes-vm-backup`, and runs `restic forget --tag hermes-vm-backup --group-by host,tags --keep-daily 7 --keep-weekly 8 --keep-monthly 12 --keep-yearly 2 --prune` only after a successful backup. The stable tag/grouping keeps retention meaningful even though staging paths rotate every run. It appends a redacted daily local log under `HERMES_BACKUP_LOG_DIR` (default `~/.local/state/hermes-backup/logs/`), keeps successful runs quiet in Telegram, and sends one compact raw Telegram Bot API alert when staging, backup, or prune fails and local Telegram config is available. It prints status, the staging root, and the snapshot id when available; it does not print B2 keys, restic passwords, Telegram credentials, file contents, or backup archives. It is intentionally limited to backup plus retention/prune/log/alert behavior; timers, promote, and drill behavior remain downstream tickets.
 
 Run a repository health check after local config is created:
 
@@ -73,7 +73,7 @@ Run a repository health check after local config is created:
 scripts/restic-check.sh
 ```
 
-`restic-check.sh` validates the same local chmod-600 env file and restic password file, runs `restic check` against the configured repository, and prints compact status for local logs or later alerting. Exit code `0` means the check passed, `64` means local config is missing or unsafe, `127` means `restic` is unavailable, and any other non-zero exit is the propagated `restic check` failure. Failure output is redacted for B2 keys, restic password-file paths, repository URLs, Telegram credentials, file contents, and backup archives. It does not implement Telegram alerting, systemd timers, restore, promote, or drill behavior.
+`restic-check.sh` validates the same local chmod-600 env file and restic password file, runs `restic check` against the configured repository, appends a redacted daily local log under `HERMES_BACKUP_LOG_DIR` (default `~/.local/state/hermes-backup/logs/`), keeps successful checks quiet in Telegram, and sends one compact raw Telegram Bot API alert when `restic check` fails and local Telegram config is available. Exit code `0` means the check passed, `64` means local config is missing or unsafe, `127` means `restic` is unavailable, and any other non-zero exit is the propagated `restic check` failure. Failure output is redacted for B2 keys, restic password-file paths, repository URLs, Telegram credentials, file contents, backup archives, Authorization-like values, and credential-looking strings. It does not implement systemd timers, restore, promote, or drill behavior.
 
 ## Safe restore command
 
@@ -141,8 +141,8 @@ What is intentionally not active yet:
 - No user systemd service/timer is enabled or started.
 - No Hermes cron scheduling is used.
 
-Downstream tickets own drill behavior, raw Telegram alerts, first-run verification, and user systemd timer enablement.
+Downstream tickets own drill behavior, first-run verification, and user systemd timer enablement.
 
 ## Current status
 
-This foundation, backup, safe-restore, check, and promote slice establishes repo structure, docs, ignore rules, placeholder config, inert systemd templates, safety tests, the offline preflight contract at `scripts/preflight.sh --check`, the local config/secret prompt writer at `scripts/configure.sh`, the bootstrap skeleton at `./install.sh`, SQLite-safe staging at `scripts/stage.sh`, the manual restic backup/retention command at `scripts/backup.sh`, the manual restic repository health check at `scripts/restic-check.sh`, the manual non-live restore command at `scripts/restore.sh`, and the manual explicit live promote command at `scripts/promote.sh`. Telegram delivery, restic initialization, live timer enablement, and restore drills remain downstream work.
+This foundation, backup, safe-restore, check, promote, and alert slice establishes repo structure, docs, ignore rules, placeholder config, inert systemd templates, safety tests, the offline preflight contract at `scripts/preflight.sh --check`, the local config/secret prompt writer at `scripts/configure.sh`, the bootstrap skeleton at `./install.sh`, SQLite-safe staging at `scripts/stage.sh`, the manual restic backup/retention command at `scripts/backup.sh`, the manual restic repository health check at `scripts/restic-check.sh`, shared redacted local log/raw Telegram failure alert helpers under `lib/hermes-backup/log-alert.sh`, the manual non-live restore command at `scripts/restore.sh`, and the manual explicit live promote command at `scripts/promote.sh`. Restic initialization, live timer enablement, and restore drills remain downstream work.
