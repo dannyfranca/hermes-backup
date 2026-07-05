@@ -52,6 +52,8 @@ SCRIPT_DIR="$(cd -- "$SCRIPT_SOURCE" && pwd -P)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 # shellcheck source=../lib/hermes-backup/log-alert.sh
 source "$REPO_ROOT/lib/hermes-backup/log-alert.sh"
+# shellcheck source=../lib/hermes-backup/runtime-lock.sh
+source "$REPO_ROOT/lib/hermes-backup/runtime-lock.sh"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -171,7 +173,7 @@ source "$CONFIG_ENV_PATH" >/dev/null 2>&1 || exit 10
 { set +x; } 2>/dev/null || true
 unset BASH_XTRACEFD
 exec {xtrace_fd}>&-
-for name in B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID HERMES_BACKUP_LOG_DIR; do
+for name in B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID HERMES_BACKUP_LOG_DIR HERMES_BACKUP_LOCK_FILE; do
   printf '%s=%q\n' "$name" "${!name-}"
 done
 BASH_LOAD_ENV
@@ -191,7 +193,21 @@ if ! RESTIC_PASSWORD_VALUE="$(/usr/bin/cat -- "$RESTIC_PASSWORD_FILE" 2>/dev/nul
   fail_config "local restic password file could not be read"
 fi
 unset RESTIC_PASSWORD RESTIC_PASSWORD_COMMAND
-export -n B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE RESTIC_PASSWORD_VALUE HERMES_BACKUP_LOG_DIR TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID 2>/dev/null || true
+export -n B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE RESTIC_PASSWORD_VALUE HERMES_BACKUP_LOG_DIR HERMES_BACKUP_LOCK_FILE TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID 2>/dev/null || true
+
+if hb_acquire_runtime_lock "check"; then
+  log "runtime_lock=acquired lock_file=$HERMES_BACKUP_RUNTIME_LOCK_FILE policy=exclusive backup_contention=fail-alert check_contention=skip-report drill_contention=skip-report"
+else
+  lock_rc=$?
+  if [[ "$lock_rc" -eq 1 ]]; then
+    lock_summary="$(hb_runtime_lock_busy_summary "check")"
+    hb_log_event "check" "skipped" "0" "$lock_summary" || true
+    printf 'check=skipped reason=runtime-lock-held lock_file=%s\n' "$HERMES_BACKUP_RUNTIME_LOCK_FILE"
+    printf 'No restic check was started because another hermes-backup job is running.\n'
+    exit 0
+  fi
+  fail_config "runtime lock could not be prepared"
+fi
 
 if ! command -v restic >/dev/null 2>&1; then
   hb_log_and_alert_failure "check" "127" "restic is required for check"

@@ -62,7 +62,7 @@ Use this when the VM is broken and you need the shortest safe path.
     scripts/promote.sh --yes --confirm PROMOTE-HERMES-RESTORE "$RESTORE_DIR"
     ```
 
-13. Enable the approved backup/check/restore-drill user timers after restore/promote verification, or after Section 10 credential rotation if compromise is suspected. The activation gate requires a successful first backup/check in the same run before timer enablement and creates enabled symlinks without `--now`; start the timer units manually only if current-session scheduling is desired and systemd catch-up behavior is acceptable:
+13. Enable the approved backup/check/restore-drill user timers after restore/promote verification, or after Section 10 credential rotation if compromise is suspected. The activation gate requires a successful first backup/check in the same run before timer enablement and creates enabled symlinks without `--now`; start the timer units manually only if current-session scheduling is desired and systemd catch-up behavior is acceptable. If `Persistent=true` catch-up or manual starts collide, the shared lock at `$XDG_STATE_HOME/hermes-backup/run.lock` when set or `~/.local/state/hermes-backup/run.lock` otherwise (or local `HERMES_BACKUP_LOCK_FILE`) makes the policy explicit: backup contention fails and alerts, check contention skips quietly with a local log, and restore-drill contention skips with a `SKIP` raw Telegram drill report:
 
     ```bash
     scripts/activate.sh --first-backup --first-check --enable-timers
@@ -159,7 +159,7 @@ Run these from a local shell on the replacement VM.
    systemctl --user list-timers --all 'hermes-backup-*'
    ```
 
-Timer enablement uses `systemctl --user enable` without `--now`, so it does not immediately run backup, check, or restore-drill jobs.
+Timer enablement uses `systemctl --user enable` without `--now`, so it does not immediately run backup, check, or restore-drill jobs. All three runtime commands use one non-blocking lock file before touching the restic repository or restore-drill target; this is intentionally a simple overlap guard, not a retry queue or scheduler.
 
 ## 4. Safe restore workflow
 
