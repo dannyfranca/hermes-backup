@@ -1,6 +1,6 @@
 # Bootstrap baseline
 
-This document defines the bootstrap contract for the foundation implementation tickets. The current slice adds the safe one-command install skeleton, local config/secret prompt writer, offline preflight composition, and backup/check user systemd unit rendering. Timers are disabled by default; `./install.sh --enable-timers` enables only the backup/check timer symlinks through the same verification gate, without `--now`. It does not install packages, initialize restic, call B2/Telegram, run backup/restore behavior, or enable restore-drill scheduling.
+This document defines the bootstrap contract for the foundation implementation tickets. The current scheduler path includes the safe one-command install skeleton, local config/secret prompt writer, offline preflight composition, and backup/check/restore-drill user systemd unit rendering. Timers are disabled by default; `./install.sh --enable-timers` enables the backup/check/restore-drill timer symlinks through the same verification gate, without `--now`. It does not install packages, initialize restic, call B2/Telegram, run backup/restore/drill behavior, or use Hermes cron.
 
 ## Required offline verification harness
 
@@ -27,8 +27,8 @@ The skeleton runs in this order:
 1. `scripts/preflight.sh --check` before any secret prompt.
 2. Local state/log/staging, safe restore, and systemd user unit directory setup.
 3. `scripts/configure.sh` only when local config files do not already exist; otherwise reuse the existing chmod-600 local config.
-4. Render backup/check unit files from `systemd/user/` into `~/.config/systemd/user/` and run `systemctl --user daemon-reload`.
-5. Leave timers disabled by default, or enable only the backup/check timers when `--enable-timers` is passed after local scheduler verification.
+4. Render backup/check/restore-drill unit files from `systemd/user/` into `~/.config/systemd/user/` and run `systemctl --user daemon-reload`.
+5. Leave timers disabled by default, or enable only the approved user timers when `--enable-timers` is passed after local scheduler verification.
 
 Default local paths:
 
@@ -39,6 +39,8 @@ Default local paths:
 ~/.config/systemd/user/hermes-backup-backup.timer
 ~/.config/systemd/user/hermes-backup-check.service
 ~/.config/systemd/user/hermes-backup-check.timer
+~/.config/systemd/user/hermes-backup-restore-drill.service
+~/.config/systemd/user/hermes-backup-restore-drill.timer
 ~/.local/state/hermes-backup/logs/
 ~/.local/state/hermes-backup/staging/
 ~/restore/hermes-vm-backup/
@@ -102,13 +104,12 @@ Use obvious dummy values in non-interactive mode. Do not pass real secrets throu
 
 ## Remaining bootstrap goals
 
-This slice now renders concrete backup/check user systemd units and can enable those timer symlinks through `./install.sh --enable-timers`. Downstream tickets should extend bootstrap only after the backing behavior exists:
+This scheduler path now renders concrete backup/check/restore-drill user systemd units and can enable those timer symlinks through `./install.sh --enable-timers`. Remaining bootstrap work should extend install only after the backing behavior exists:
 
 1. Install missing required local tools when explicitly approved.
 2. Initialize or verify the restic repository.
-3. Run first-use backup/check/Telegram verification.
+3. Run first-use backup/check/drill/Telegram verification.
 4. Activate timer units in the current user manager session only after first-use verification and operator acceptance of systemd persistent catch-up behavior.
-5. Add restore-drill command/timer wiring after the restore-drill-runbook bundle provides a reviewed drill command.
 
 ## Dependency preflight
 
@@ -150,30 +151,30 @@ Those paths are examples of where local state lives. They are generated locally 
 
 Backup, check, and restore-drill scheduling must use user-level systemd timers. Do not use Hermes cron for this project because backups must keep running when Hermes itself is unhealthy.
 
-This slice renders and installs only the reviewed backup/check units:
+The installer renders and installs only the reviewed backup/check/restore-drill units:
 
 ```text
 ~/.config/systemd/user/hermes-backup-backup.service
 ~/.config/systemd/user/hermes-backup-backup.timer
 ~/.config/systemd/user/hermes-backup-check.service
 ~/.config/systemd/user/hermes-backup-check.timer
+~/.config/systemd/user/hermes-backup-restore-drill.service
+~/.config/systemd/user/hermes-backup-restore-drill.timer
 ```
 
 Use these manual checks after install:
 
 ```bash
-systemctl --user status hermes-backup-backup.timer hermes-backup-check.timer
+systemctl --user status hermes-backup-backup.timer hermes-backup-check.timer hermes-backup-restore-drill.timer
 systemctl --user list-timers --all 'hermes-backup-*'
-systemctl --user status hermes-backup-backup.service hermes-backup-check.service
+systemctl --user status hermes-backup-backup.service hermes-backup-check.service hermes-backup-restore-drill.service
 ```
 
-Timers are not enabled by default. `./install.sh --enable-timers` enables only the backup/check timer units through the same local unit/config verification gate. It intentionally uses `systemctl --user enable` without `--now`, so install does not start persistent timers or dispatch missed backup/check runs. `--enable-timers` cannot be combined with `--systemd-user-dir`; custom unit dirs are for tests/staging renders only, so enablement always targets the default user manager path.
-
-The monthly restore-drill command/timer is intentionally deferred to the restore-drill-runbook bundle. Do not enable a drill timer until that command exists and has been reviewed.
+Timers are not enabled by default. `./install.sh --enable-timers` enables only the approved backup/check/restore-drill timer units through the same local unit/config verification gate. It intentionally uses `systemctl --user enable` without `--now`, so install does not start persistent timers or dispatch missed backup/check/drill runs. `--enable-timers` cannot be combined with `--systemd-user-dir`; custom unit dirs are for tests/staging renders only, so enablement always targets the default user manager path.
 
 ## Downstream behavior not implemented here
 
-- No live promote/drill commands.
+- No live promote commands.
 - `install.sh` does not run backup/check/restore/promote/drill commands.
 - No package installation.
 - No network validation against B2, restic, or Telegram.

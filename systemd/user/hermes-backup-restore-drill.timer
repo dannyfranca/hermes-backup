@@ -1,0 +1,14 @@
+# Source template rendered by install.sh into the user's systemd unit dir.
+# User-level systemd timers are required; Hermes cron must not schedule restore drills.
+
+[Unit]
+Description=Monthly Hermes VM safe restore drill timer
+
+[Timer]
+OnCalendar=Sun *-*-01..07 10:30:00
+Persistent=true
+RandomizedDelaySec=2h
+Unit=hermes-backup-restore-drill.service
+
+[Install]
+WantedBy=timers.target
