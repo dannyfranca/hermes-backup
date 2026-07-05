@@ -47,6 +47,8 @@ The staging scope is versioned under `config/manifests/`:
 - `include.paths` is the source of truth for live paths backup staging may consider.
 - `exclude.patterns` is the source of truth for forbidden classes that must never enter staging.
 
+Hermes profile dependency stores such as Go module caches under profile `home/go/pkg/mod` directories and pnpm stores under profile `home/.local/share/pnpm/store` directories are intentionally omitted as rebuildable state. The exclusions are path-specific so durable profile config and local state under `.hermes/profiles/*` still remain eligible for encrypted backup.
+
 Run the offline inventory dry-run before staging/restic work:
 
 ```bash

@@ -66,6 +66,7 @@ def fake_bin(tmp_path: Path) -> Path:
         for i, a in enumerate(args[:-1]):
             if a == "--filter" and args[i + 1].startswith("- "): filters.append(args[i + 1][2:])
             if a == "--exclude": filters.append(args[i + 1])
+        if os.environ.get("FAKE_RSYNC_IGNORE_FILTERS") == "1": filters = []
         cleaned, skip = [], False
         for arg in args:
             if skip: skip = False; continue
@@ -104,6 +105,7 @@ def fixture_root(tmp_path: Path) -> Path:
     root = tmp_path / "fixture-root"
     for path in [
         "/home/agent/.hermes/profiles/execution-coder/config.yaml",
+        "/home/agent/.hermes/profiles/execution-coder/home/.local/share/hermes/durable-state.json",
         "/home/agent/shared/reports/status.html",
         "/home/agent/shared-assets/mermaid/mermaid.min.js",
         "/home/agent/.config/systemd/user/hermes-gateway.service",
@@ -119,7 +121,11 @@ def fixture_root(tmp_path: Path) -> Path:
     for path in [
         "/home/agent/.hermes/honcho/config.json",
         "/home/agent/shared/project/.git/config",
+        "/home/agent/shared/project/worktrees/t_123/file.txt",
         "/home/agent/shared/app/node_modules/pkg/index.js",
+        "/home/agent/.hermes/home/go/pkg/mod/github.com/example/module/cache.go",
+        "/home/agent/.hermes/profiles/execution-coder/home/go/pkg/mod/github.com/example/module/cache.go",
+        "/home/agent/.hermes/profiles/execution-coder/home/.local/share/pnpm/store/v3/files/aa/cache",
         "/home/agent/shared/app/.venv/bin/python",
         "/home/agent/shared/app/.cache/download.bin",
         "/home/agent/shared/logs/run.log",
@@ -181,6 +187,7 @@ def test_stage_keep_preserves_structure_sqlite_backup_metadata_and_excludes(tmp_
     staging_root = staging_root_from(output)
     for relative in [
         "home/agent/.hermes/profiles/execution-coder/config.yaml",
+        "home/agent/.hermes/profiles/execution-coder/home/.local/share/hermes/durable-state.json",
         "home/agent/shared/reports/status.html",
         "home/agent/shared-assets/mermaid/mermaid.min.js",
         "home/agent/.config/systemd/user/hermes-gateway.service",
@@ -192,12 +199,37 @@ def test_stage_keep_preserves_structure_sqlite_backup_metadata_and_excludes(tmp_
     assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     assert conn.execute("select title from tasks where id='t_fixture'").fetchone()[0] == "SQLite fixture"
     conn.close()
-    for relative in ["home/agent/.hermes/honcho/config.json", "home/agent/shared/project/.git/config", "home/agent/shared/app/node_modules/pkg/index.js", "home/agent/shared/logs/run.log", "home/agent/shared/archives/hermes.tar", "home/agent/shared/backups/snapshot.sqlite-backup"]:
+    for relative in [
+        "home/agent/.hermes/honcho/config.json",
+        "home/agent/shared/project/.git/config",
+        "home/agent/shared/app/node_modules/pkg/index.js",
+        "home/agent/.hermes/home/go/pkg/mod/github.com/example/module/cache.go",
+        "home/agent/.hermes/profiles/execution-coder/home/go/pkg/mod/github.com/example/module/cache.go",
+        "home/agent/.hermes/profiles/execution-coder/home/.local/share/pnpm/store/v3/files/aa/cache",
+        "home/agent/shared/logs/run.log",
+        "home/agent/shared/archives/hermes.tar",
+        "home/agent/shared/backups/snapshot.sqlite-backup",
+    ]:
         assert not (staging_root / relative).exists(), relative
     metadata = json.loads((staging_root / "staging-metadata.json").read_text())
     assert metadata["include_roots"][:2] == ["/home/agent/.hermes", "/home/agent/shared"]
     assert metadata["sqlite_backups"] == ["/home/agent/.hermes/kanban.db"]
     assert metadata["counts"]["sqlite_backups"] == 1
+
+
+def test_stage_final_guard_rejects_profile_dependency_cache_if_rsync_filter_misses_it(tmp_path):
+    result = run_stage(
+        tmp_path,
+        "--keep",
+        root=fixture_root(tmp_path),
+        extra_env={"FAKE_RSYNC_IGNORE_FILTERS": "1"},
+    )
+    output = combined(result)
+
+    assert result.returncode != 0
+    assert "forbidden-staged path=/home/agent/.hermes/home/go/pkg/mod/github.com/example/module/cache.go" in output
+    assert "forbidden-staged path=/home/agent/.hermes/profiles/execution-coder/home/.local/share/pnpm/store/v3/files/aa/cache" in output
+    assert_no_secrets(output)
 
 
 def test_stage_default_cleanup_removes_successful_transient_staging(tmp_path):

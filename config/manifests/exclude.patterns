@@ -7,6 +7,10 @@
 /home/agent/**/.git/**                       # Embedded Git metadata must not be staged
 /home/agent/**/worktrees/**                  # Task worktrees are rebuildable
 /home/agent/**/node_modules/**               # Dependency directories are rebuildable
+/home/agent/.hermes/home/go/pkg/mod/**       # Hermes default profile Go module cache is rebuildable
+/home/agent/.hermes/profiles/*/home/go/pkg/mod/** # Hermes profile Go module caches are rebuildable
+/home/agent/.hermes/home/.local/share/pnpm/store/** # Hermes default profile pnpm store is rebuildable
+/home/agent/.hermes/profiles/*/home/.local/share/pnpm/store/** # Hermes profile pnpm stores are rebuildable
 /home/agent/**/.venv/**                      # Python virtualenvs are rebuildable
 /home/agent/**/venv/**                       # Python virtualenvs are rebuildable
 /home/agent/**/__pycache__/**                # Python bytecode caches are rebuildable

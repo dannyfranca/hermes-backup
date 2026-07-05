@@ -70,6 +70,8 @@ def test_manifest_files_exist_and_cover_required_scope():
         ".venv",
         "__pycache__",
         ".cache",
+        "go/pkg/mod",
+        "pnpm/store",
         ".mypy_cache",
         ".pytest_cache",
         ".ruff_cache",
@@ -127,6 +129,9 @@ def test_inventory_dry_run_fails_for_representative_forbidden_classes(tmp_path):
         "/home/agent/shared/project/.git/config",
         "/home/agent/shared/project/worktrees/t_123/file.txt",
         "/home/agent/shared/app/node_modules/pkg/index.js",
+        "/home/agent/.hermes/home/go/pkg/mod/github.com/example/module/cache.go",
+        "/home/agent/.hermes/profiles/execution-coder/home/go/pkg/mod/github.com/example/module/cache.go",
+        "/home/agent/.hermes/profiles/execution-coder/home/.local/share/pnpm/store/v3/files/aa/cache",
         "/home/agent/shared/app/.venv/bin/python",
         "/home/agent/shared/app/__pycache__/module.pyc",
         "/home/agent/shared/app/.cache/download.bin",
@@ -161,6 +166,9 @@ def test_inventory_dry_run_fails_for_representative_forbidden_classes(tmp_path):
     assert result.returncode != 0
     assert "forbidden path=/home/agent/.hermes/honcho/config.json" in output
     assert "forbidden path=/home/agent/shared/app/node_modules/pkg/index.js" in output
+    assert "forbidden path=/home/agent/.hermes/home/go/pkg/mod/github.com/example/module/cache.go" in output
+    assert "forbidden path=/home/agent/.hermes/profiles/execution-coder/home/go/pkg/mod/github.com/example/module/cache.go" in output
+    assert "forbidden path=/home/agent/.hermes/profiles/execution-coder/home/.local/share/pnpm/store/v3/files/aa/cache" in output
     assert "forbidden path=/home/agent/shared/app/.mypy_cache/module.meta.json" in output
     assert "forbidden path=/home/agent/shared/app/restic-cache/chunk" in output
     assert "forbidden path=/home/agent/shared/logs/run.log" in output
