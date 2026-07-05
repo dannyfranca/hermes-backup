@@ -32,10 +32,10 @@ Use this when the VM is broken and you need the shortest safe path.
    ./install.sh
    ```
 
-7. Prove the configured restic repository is reachable and internally consistent:
+7. Run the explicit activation/check path for repository health before restore. This sends one raw Telegram setup-test and runs a repository check without taking a fresh replacement-VM backup that could become the `latest` snapshot:
 
    ```bash
-   scripts/restic-check.sh
+   scripts/activate.sh --telegram-test --first-check
    ```
 
 8. Restore the latest backup into the safe, non-live restore directory:
@@ -57,11 +57,10 @@ Use this when the VM is broken and you need the shortest safe path.
     scripts/promote.sh --yes --confirm PROMOTE-HERMES-RESTORE "$HOME/restore/hermes-vm-backup/latest"
     ```
 
-12. Enable the approved backup/check/restore-drill user timers after restore/promote verification, or after Section 10 credential rotation if compromise is suspected. `--enable-timers` creates enabled symlinks without `--now`; start the timer units manually only if current-session scheduling is desired and systemd catch-up behavior is acceptable:
+12. Enable the approved backup/check/restore-drill user timers after restore/promote verification, or after Section 10 credential rotation if compromise is suspected. The activation gate requires a successful first backup/check in the same run before timer enablement and creates enabled symlinks without `--now`; start the timer units manually only if current-session scheduling is desired and systemd catch-up behavior is acceptable:
 
     ```bash
-    ./install.sh --enable-timers
-    systemctl --user daemon-reload
+    scripts/activate.sh --first-backup --first-check --enable-timers
     systemctl --user start hermes-backup-backup.timer hermes-backup-check.timer hermes-backup-restore-drill.timer
     systemctl --user status hermes-backup-backup.timer hermes-backup-check.timer hermes-backup-restore-drill.timer
     systemctl --user list-timers --all 'hermes-backup-*'
@@ -142,14 +141,20 @@ Run these from a local shell on the replacement VM.
    ~/restore/hermes-vm-backup/
    ```
 
-4. Do not enable timers until the repository check, safe restore, and operator verification pass. When ready, enable only the approved user timers:
+4. Do not enable timers until the repository check, safe restore, and operator verification pass. For recovery verification before restore, use a check-only activation path so the replacement VM does not create a new backup before `restore.sh latest`:
 
    ```bash
-   ./install.sh --enable-timers
+   scripts/activate.sh --telegram-test --first-check
+   ```
+
+   When ready after verification, enable only the approved user timers through the activation gate:
+
+   ```bash
+   scripts/activate.sh --first-backup --first-check --enable-timers
    systemctl --user list-timers --all 'hermes-backup-*'
    ```
 
-`./install.sh --enable-timers` uses `systemctl --user enable` without `--now`, so it does not immediately run backup, check, or restore-drill jobs.
+Timer enablement uses `systemctl --user enable` without `--now`, so it does not immediately run backup, check, or restore-drill jobs.
 
 ## 4. Safe restore workflow
 
@@ -257,7 +262,7 @@ After promote, verify the VM is usable before declaring recovery done.
 2. Enable the approved backup/check/restore-drill user timers after restore/promote verification, or after Section 10 credential rotation if compromise is suspected. `--enable-timers` creates enabled symlinks without `--now`; start the timer units manually only if current-session scheduling is desired and systemd catch-up behavior is acceptable, then inspect restored user units and backup timers:
 
    ```bash
-   ./install.sh --enable-timers
+   scripts/activate.sh --first-backup --first-check --enable-timers
    systemctl --user start hermes-backup-backup.timer hermes-backup-check.timer hermes-backup-restore-drill.timer
    systemctl --user list-unit-files | grep '^hermes' || true
    systemctl --user status hermes-backup-backup.timer hermes-backup-check.timer hermes-backup-restore-drill.timer
@@ -334,7 +339,7 @@ Use this after setup and periodically after changes.
 - Check path: `scripts/restic-check.sh` exits `0` for a healthy repository and sends one raw Telegram failure alert on simulated failure when local Telegram config exists.
 - Safe restore path: `scripts/restore.sh` restores into `~/restore/hermes-vm-backup/latest` or a snapshot-specific safe directory and prints expected include-root status.
 - Promote path: `scripts/promote.sh --dry-run <restore-dir>` is reviewed before any `--yes --confirm PROMOTE-HERMES-RESTORE` run.
-- Timer path: `./install.sh --enable-timers` enables backup, check, and restore-drill timer symlinks without `--now`; after a new user-manager activation or an explicit `systemctl --user start hermes-backup-*.timer`, `systemctl --user list-timers --all 'hermes-backup-*'` shows current-session schedules.
+- Activation/timer path: `scripts/activate.sh --init-restic --telegram-test --first-backup --first-check --enable-timers` is the full first-run setup sequence after `./install.sh`; timer enablement requires first backup/check verification and uses `systemctl --user enable` without `--now`. After a new user-manager activation or an explicit `systemctl --user start hermes-backup-*.timer`, `systemctl --user list-timers --all 'hermes-backup-*'` shows current-session schedules.
 - Drill path: `scripts/restore-drill.sh` verifies a safe drill restore, does not invoke promote, and raw Telegram delivery is proven by the message arriving or by `drill_report=sent transport=raw-telegram-api` in output/logs. Use `--keep-artifacts` only for manual inspection and delete retained artifacts promptly.
 - Logs: `~/.local/state/hermes-backup/logs/` contains redacted local logs with no B2 keys, restic passwords, Telegram tokens, repository URLs, file contents, or backup archives.
 - SQLite: restored `*.db`, `*.sqlite`, `*.sqlite3`, and `*.db3` files report `ok` from `PRAGMA integrity_check`.

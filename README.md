@@ -77,6 +77,20 @@ scripts/restic-check.sh
 
 `restic-check.sh` validates the same local chmod-600 env file and restic password file, runs `restic check` against the configured repository, appends a redacted daily local log under `HERMES_BACKUP_LOG_DIR` (default `~/.local/state/hermes-backup/logs/`), keeps successful checks quiet in Telegram, and sends one compact raw Telegram Bot API alert when `restic check` fails and local Telegram config is available. Exit code `0` means the check passed, `64` means local config is missing or unsafe, `127` means `restic` is unavailable, and any other non-zero exit is the propagated `restic check` failure. Failure output is redacted for B2 keys, restic password-file paths, repository URLs, Telegram credentials, file contents, backup archives, Authorization-like values, and credential-looking strings. It does not implement restore, promote, or drill behavior.
 
+## First-run activation after local secrets exist
+
+`./install.sh` stays inert by default. After local config exists, run the explicit activation/check path from a local terminal:
+
+```bash
+./install.sh
+scripts/activate.sh --init-restic --telegram-test --first-backup --first-check --enable-timers
+systemctl --user list-timers --all 'hermes-backup-*'
+```
+
+`scripts/activate.sh` first runs the offline preflight and local chmod-600 config/password checks. It verifies the configured restic repository, runs `restic init` only when the repository looks uninitialized and `--init-restic` is passed, sends one raw Telegram Bot API setup-test message only with `--telegram-test`, runs one first backup only with `--first-backup`, runs one repository check only with `--first-check`, and enables the backup/check/restore-drill user timers only after `--first-backup` and `--first-check` succeed in the same activation run. Timer enablement delegates to `./install.sh --enable-timers`, which uses `systemctl --user enable` without `--now`; no timer unit is started unexpectedly.
+
+For a non-network preview, use `scripts/activate.sh --dry-run` with any planned flags. The command prints only paths/status and redacted diagnostics. It must not print B2 keys, restic passwords, Telegram credentials, repository URLs, file contents, or backup archives.
+
 ## User systemd backup/check/restore-drill timers
 
 `./install.sh` renders the versioned templates in `systemd/user/` into the user's systemd unit directory, defaulting to `~/.config/systemd/user/`, then runs `systemctl --user daemon-reload`. The rendered services call only the approved repo commands:
@@ -99,7 +113,7 @@ systemctl --user list-timers --all 'hermes-backup-*'
 systemctl --user status hermes-backup-backup.timer hermes-backup-check.timer hermes-backup-restore-drill.timer
 ```
 
-The gate runs `systemctl --user enable` without `--now` so install does not immediately start persistent timers or dispatch missed backup/check/drill runs. If Danny wants timers active immediately in the current user manager session, he can start the timer units manually after accepting any systemd catch-up behavior.
+The gate runs `systemctl --user enable` without `--now` so install does not immediately start persistent timers or dispatch missed backup/check/drill runs. For first setup, prefer the activation sequence above so timer enablement happens only after the first backup and check pass. If Danny wants timers active immediately in the current user manager session, he can start the timer units manually after accepting any systemd catch-up behavior.
 
 The installer never runs backup, check, restore, promote, drill, restic init, B2/Telegram network validation, or Hermes cron scheduling. The restore-drill timer points only at the already-reviewed safe drill command and never at `restore.sh` or `promote.sh` directly.
 
@@ -112,11 +126,11 @@ The shortest safe recovery path is:
 1. Clone `dannyfranca/hermes-backup` onto the replacement VM.
 2. Run `scripts/preflight.sh --check` and `./install.sh` from a local terminal.
 3. Enter B2/restic/Telegram values only into local prompts from Danny's password manager.
-4. Run `scripts/restic-check.sh`.
+4. Run `scripts/activate.sh --telegram-test --first-check` to prove alert delivery and repository health before restore without taking a replacement-VM backup over the snapshot selection path.
 5. Run `scripts/restore.sh` and inspect the safe restore directory.
 6. Dry-run `scripts/promote.sh --dry-run <restore-dir>`.
 7. Run `scripts/promote.sh --yes --confirm PROMOTE-HERMES-RESTORE <restore-dir>` only after the restore has been verified.
-8. Run `./install.sh --enable-timers` after restore/promote verification, or after credential rotation if compromise is suspected. Start timer units manually only if current-session scheduling is desired and systemd catch-up behavior is acceptable, then verify user systemd timers, key restored paths, SQLite integrity, local logs, and raw Telegram drill reporting.
+8. Run `scripts/activate.sh --first-backup --first-check --enable-timers` after restore/promote verification, or after credential rotation if compromise is suspected. Start timer units manually only if current-session scheduling is desired and systemd catch-up behavior is acceptable, then verify user systemd timers, key restored paths, SQLite integrity, local logs, and raw Telegram drill reporting.
 
 ## Safe restore command
 
@@ -166,7 +180,7 @@ The harness is offline-only. It runs shell syntax checks, pytest coverage for pr
 
 ## Stress-friendly bootstrap checklist
 
-This foundation slice provides a safe one-command skeleton:
+This foundation slice provides a safe install skeleton:
 
 ```bash
 ./install.sh
@@ -191,8 +205,8 @@ What is intentionally not active yet:
 - No Hermes cron scheduling is used.
 - No timer units are started by install; `--enable-timers` only enables user timer symlinks for the next user-manager activation.
 
-Downstream tickets own first-run repository verification, current-session timer starts, and broader end-to-end drill safety harness expansion.
+First-run repository verification now lives in `scripts/activate.sh`. Current-session timer starts remain intentionally manual because systemd catch-up behavior should be accepted by the operator at the terminal.
 
 ## Current status
 
-This foundation, backup, safe-restore, check, promote, alert, drill-reporting, and scheduler slice establishes repo structure, docs, ignore rules, placeholder config, backup/check/restore-drill systemd user templates, safety tests, the offline preflight contract at `scripts/preflight.sh --check`, the local config/secret prompt writer at `scripts/configure.sh`, the bootstrap/systemd installer at `./install.sh`, SQLite-safe staging at `scripts/stage.sh`, the manual restic backup/retention command at `scripts/backup.sh`, the manual restic repository health check at `scripts/restic-check.sh`, shared redacted local log/raw Telegram helpers under `lib/hermes-backup/log-alert.sh`, the manual non-live restore command at `scripts/restore.sh`, the manual explicit live promote command at `scripts/promote.sh`, and the manual safe monthly restore drill command at `scripts/restore-drill.sh`. Restic initialization, current-session timer start, first-run repository verification, and broader end-to-end safety harness work remain downstream.
+This foundation, backup, safe-restore, check, promote, alert, drill-reporting, scheduler, and first-run activation slice establishes repo structure, docs, ignore rules, placeholder config, backup/check/restore-drill systemd user templates, safety tests, the offline preflight contract at `scripts/preflight.sh --check`, the local config/secret prompt writer at `scripts/configure.sh`, the bootstrap/systemd installer at `./install.sh`, SQLite-safe staging at `scripts/stage.sh`, the manual restic backup/retention command at `scripts/backup.sh`, the manual restic repository health check at `scripts/restic-check.sh`, the explicit first-run activation/check command at `scripts/activate.sh`, shared redacted local log/raw Telegram helpers under `lib/hermes-backup/log-alert.sh`, the manual non-live restore command at `scripts/restore.sh`, the manual explicit live promote command at `scripts/promote.sh`, and the manual safe monthly restore drill command at `scripts/restore-drill.sh`. Current-session timer start and broader end-to-end safety harness work remain downstream/manual.
