@@ -177,21 +177,20 @@ hb_alert_message() {
   printf '%s' "${rendered:0:1800}"
 }
 
-hb_send_failure_alert() {
-  local command_name=$1 exit_code=$2 summary=$3 details_file=${4:-}
-  local message curl_output curl_rc message_file
+hb_send_raw_telegram_text() {
+  local command_name=$1 message=$2 event_prefix=${3:-alert}
+  local curl_output curl_rc message_file
   local -a curl_env
 
   if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
-    hb_append_log_line "alert=skipped reason=missing_telegram_config command=$command_name"
-    return 0
+    hb_append_log_line "$event_prefix=skipped reason=missing_telegram_config command=$command_name"
+    return 1
   fi
   if ! command -v curl >/dev/null 2>&1; then
-    hb_append_log_line "alert=skipped reason=curl_missing command=$command_name"
-    return 0
+    hb_append_log_line "$event_prefix=skipped reason=curl_missing command=$command_name"
+    return 1
   fi
 
-  message="$(hb_alert_message "$command_name" "$exit_code" "$summary" "$details_file")"
   message_file="$(/usr/bin/mktemp -t hermes-backup-telegram-message.XXXXXX)"
   printf '%s' "$message" >"$message_file"
   /usr/bin/chmod 600 -- "$message_file" 2>/dev/null || true
@@ -214,15 +213,48 @@ CURL_CONFIG
   curl_rc=$?
   set -e
   if [[ "$curl_rc" -eq 0 ]]; then
-    hb_append_log_line "alert=sent command=$command_name transport=raw-telegram-api"
+    hb_append_log_line "$event_prefix=sent command=$command_name transport=raw-telegram-api"
   else
-    hb_append_log_line "alert=failed command=$command_name curl_exit=$curl_rc"
+    hb_append_log_line "$event_prefix=failed command=$command_name curl_exit=$curl_rc"
     if [[ -n "${HERMES_BACKUP_LOG_FILE:-}" ]]; then
-      hb_redact_file "$curl_output" | /usr/bin/sed 's/^/alert_error=/' >>"$HERMES_BACKUP_LOG_FILE" || true
+      hb_redact_file "$curl_output" | /usr/bin/sed "s/^/${event_prefix}_error=/" >>"$HERMES_BACKUP_LOG_FILE" || true
     fi
   fi
   rm -f -- "$curl_output" "$message_file"
+  [[ "$curl_rc" -eq 0 ]]
+}
+
+hb_send_failure_alert() {
+  local command_name=$1 exit_code=$2 summary=$3 details_file=${4:-}
+  local message
+  message="$(hb_alert_message "$command_name" "$exit_code" "$summary" "$details_file")"
+  hb_send_raw_telegram_text "$command_name" "$message" "alert" || true
   return 0
+}
+
+hb_drill_report_message() {
+  local status=$1 summary=$2 details_file=${3:-} rendered
+  rendered="$({
+    printf 'Hermes backup restore drill\n'
+    printf 'status: %s\n' "$status"
+    printf 'time: %s\n' "$(hb_timestamp_utc)"
+    printf 'host: %s\n' "$(hostname 2>/dev/null || printf 'unknown')"
+    printf 'summary: %s\n' "$summary"
+    if [[ -n "$details_file" && -s "$details_file" ]]; then
+      printf 'details:\n'
+      hb_redact_file "$details_file" | /usr/bin/sed -n '1,10p'
+    fi
+  } | while IFS= read -r line || [[ -n "$line" ]]; do
+    hb_redact_line "$line"
+  done)"
+  printf '%s' "${rendered:0:1800}"
+}
+
+hb_send_drill_report() {
+  local status=$1 summary=$2 details_file=${3:-}
+  local message
+  message="$(hb_drill_report_message "$status" "$summary" "$details_file")"
+  hb_send_raw_telegram_text "drill" "$message" "drill_report"
 }
 
 hb_log_and_alert_failure() {
