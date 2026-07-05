@@ -30,6 +30,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 # shellcheck source=../lib/hermes-backup/log-alert.sh
 source "$REPO_ROOT/lib/hermes-backup/log-alert.sh"
+# shellcheck source=../lib/hermes-backup/runtime-lock.sh
+source "$REPO_ROOT/lib/hermes-backup/runtime-lock.sh"
 CONFIG_ENV="${HERMES_BACKUP_ENV:-}"
 SNAPSHOT="latest"
 DRILL_ROOT=""
@@ -206,14 +208,14 @@ source "$CONFIG_ENV_PATH" >/dev/null 2>&1 || exit 10
 { set +x; } 2>/dev/null || true
 unset BASH_XTRACEFD
 exec {xtrace_fd}>&-
-for name in B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID HERMES_BACKUP_LOG_DIR HERMES_BACKUP_DRILL_DIR; do
+for name in B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID HERMES_BACKUP_LOG_DIR HERMES_BACKUP_DRILL_DIR HERMES_BACKUP_LOCK_FILE; do
   printf '%s=%q\n' "$name" "${!name-}"
 done
 BASH_LOAD_ENV
 )" || fail "local env file could not be loaded: $CONFIG_ENV"
 eval "$loaded_env"
 unset loaded_env
-export -n B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID HERMES_BACKUP_LOG_DIR HERMES_BACKUP_DRILL_DIR 2>/dev/null || true
+export -n B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID HERMES_BACKUP_LOG_DIR HERMES_BACKUP_DRILL_DIR HERMES_BACKUP_LOCK_FILE 2>/dev/null || true
 if [[ -n "${RESTIC_PASSWORD_FILE:-}" ]]; then
   validate_secret_file "local restic password file" "$RESTIC_PASSWORD_FILE"
   RESTIC_PASSWORD_VALUE="$(cat -- "$RESTIC_PASSWORD_FILE" 2>/dev/null || true)"
@@ -228,6 +230,25 @@ check_drill_root_safety "$log_dir_candidate"
 mkdir -p -- "$DRILL_ROOT"
 chmod 700 -- "$DRILL_ROOT" 2>/dev/null || true
 hb_setup_logging || fail "local log directory could not be prepared"
+
+if hb_acquire_runtime_lock "drill"; then
+  log "runtime_lock=acquired lock_file=$HERMES_BACKUP_RUNTIME_LOCK_FILE policy=exclusive backup_contention=fail-alert check_contention=skip-report drill_contention=skip-report"
+else
+  lock_rc=$?
+  if [[ "$lock_rc" -eq 1 ]]; then
+    lock_summary="$(hb_runtime_lock_busy_summary "drill")"
+    hb_log_event "drill" "skipped" "0" "$lock_summary" || true
+    if hb_send_drill_report "SKIP" "$lock_summary"; then
+      log "drill_report=sent transport=raw-telegram-api"
+    else
+      log "drill_report=failed-or-skipped transport=raw-telegram-api"
+    fi
+    log "drill=skipped reason=runtime-lock-held lock_file=$HERMES_BACKUP_RUNTIME_LOCK_FILE"
+    log "No restore or promote command was started because another hermes-backup job is running."
+    exit 0
+  fi
+  fail "runtime lock could not be prepared"
+fi
 
 drill_target="$(make_drill_target)"
 restore_output="$(mktemp -t hermes-backup-drill-restore.XXXXXX)"

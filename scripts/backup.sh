@@ -37,6 +37,8 @@ SCRIPT_DIR="$(cd -- "$SCRIPT_SOURCE" && pwd -P)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 # shellcheck source=../lib/hermes-backup/log-alert.sh
 source "$REPO_ROOT/lib/hermes-backup/log-alert.sh"
+# shellcheck source=../lib/hermes-backup/runtime-lock.sh
+source "$REPO_ROOT/lib/hermes-backup/runtime-lock.sh"
 CONFIG_ENV="${HERMES_BACKUP_ENV:-${XDG_CONFIG_HOME:-$HOME/.config}/hermes-backup/hermes-backup.env}"
 ROOT_PREFIX=""
 MANIFEST_DIR=""
@@ -184,7 +186,7 @@ source "$CONFIG_ENV_PATH" >/dev/null 2>&1 || exit 10
 { set +x; } 2>/dev/null || true
 unset BASH_XTRACEFD
 exec {xtrace_fd}>&-
-for name in B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE HERMES_BACKUP_STAGING_DIR HERMES_BACKUP_LOG_DIR TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID; do
+for name in B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE HERMES_BACKUP_STAGING_DIR HERMES_BACKUP_LOG_DIR HERMES_BACKUP_LOCK_FILE TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID; do
   printf '%s=%q\n' "$name" "${!name-}"
 done
 BASH_LOAD_ENV
@@ -204,7 +206,7 @@ if ! RESTIC_PASSWORD_VALUE="$(/usr/bin/cat -- "$RESTIC_PASSWORD_FILE" 2>/dev/nul
   fail "local restic password file could not be read"
 fi
 unset RESTIC_PASSWORD RESTIC_PASSWORD_COMMAND
-export -n B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE HERMES_BACKUP_STAGING_DIR HERMES_BACKUP_LOG_DIR TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID RESTIC_PASSWORD_VALUE 2>/dev/null || true
+export -n B2_ACCOUNT_ID B2_ACCOUNT_KEY RESTIC_REPOSITORY RESTIC_PASSWORD_FILE HERMES_BACKUP_STAGING_DIR HERMES_BACKUP_LOG_DIR HERMES_BACKUP_LOCK_FILE TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID RESTIC_PASSWORD_VALUE 2>/dev/null || true
 if [[ -z "$STAGING_PARENT" && -n "${HERMES_BACKUP_STAGING_DIR:-}" ]]; then
   STAGING_PARENT=$HERMES_BACKUP_STAGING_DIR
 fi
@@ -212,6 +214,20 @@ if [[ -n "$ROOT_PREFIX" ]]; then
   case "$ROOT_PREFIX" in /*) ;; *) fail "--root must be an absolute path" ;; esac
   [[ -d "$ROOT_PREFIX" ]] || fail "--root must be an existing directory: $ROOT_PREFIX"
   ROOT_PREFIX="$(cd -- "$ROOT_PREFIX" && pwd -P)"
+fi
+
+if hb_acquire_runtime_lock "backup"; then
+  log "runtime_lock=acquired lock_file=$HERMES_BACKUP_RUNTIME_LOCK_FILE policy=exclusive backup_contention=fail-alert check_contention=skip-report drill_contention=skip-report"
+else
+  lock_rc=$?
+  if [[ "$lock_rc" -eq 1 ]]; then
+    lock_summary="$(hb_runtime_lock_busy_summary "backup")"
+    hb_log_and_alert_failure "backup" "75" "$lock_summary" || true
+    printf 'error: %s\n' "$lock_summary" >&2
+    exit 75
+  fi
+  hb_log_and_alert_failure "backup" "64" "runtime lock could not be prepared" || true
+  fail "runtime lock could not be prepared"
 fi
 
 if ! command -v restic >/dev/null 2>&1; then
