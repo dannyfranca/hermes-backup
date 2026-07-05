@@ -32,15 +32,17 @@ def fake_bin(tmp_path: Path) -> Path:
         bin_dir / "sqlite3",
         r'''
         #!/usr/bin/env python3
-        import re, sqlite3, sys
+        import os, re, sqlite3, sys
         from pathlib import Path
         argv = sys.argv[1:]
         if argv and argv[0] == "-readonly": argv = argv[1:]
         db = Path(argv[0]); command = argv[1] if len(argv) > 1 else ""
         if command.startswith(".backup"):
-            match = re.search(r"'([^']+)'", command)
+            if os.environ.get("FAKE_SQLITE_BACKUP_FAIL") == "1": sys.exit(1)
+            match = re.search(r"\.backup(?:\s+\S+)?\s+(?:'([^']+)'|\"((?:\\.|[^\"])*)\")", command)
             if not match: sys.exit(2)
-            dest = Path(match.group(1)); dest.parent.mkdir(parents=True, exist_ok=True)
+            raw_dest = match.group(1) if match.group(1) is not None else match.group(2).replace('\\"', '"').replace('\\\\', '\\')
+            dest = Path(raw_dest); dest.parent.mkdir(parents=True, exist_ok=True)
             try:
                 src = sqlite3.connect(f"file:{db}?mode=ro", uri=True); dst = sqlite3.connect(dest)
                 with dst: src.backup(dst)
@@ -131,9 +133,11 @@ def fixture_root(tmp_path: Path) -> Path:
     return root
 
 
-def run_stage(tmp_path: Path, *args, root: Path):
+def run_stage(tmp_path: Path, *args, root: Path, extra_env: dict[str, str] | None = None):
     env = os.environ.copy()
     env.update(PATH=f"{fake_bin(tmp_path)}{os.pathsep}{os.environ.get('PATH', '')}", HOME=str(tmp_path / "home" / "agent"))
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         ["bash", str(SCRIPT), "--root", str(root), "--staging-parent", str(tmp_path / "state/hermes-backup/staging"), *args],
         cwd=ROOT, env=env, text=True, capture_output=True, check=False,
@@ -206,29 +210,71 @@ def test_stage_default_cleanup_removes_successful_transient_staging(tmp_path):
     assert_no_secrets(output)
 
 
-def test_stage_refuses_wal_mode_sqlite_without_source_sidecar_effects(tmp_path):
+def test_stage_wal_mode_sqlite_uses_private_snapshot_without_source_sidecar_effects(tmp_path):
     root = fixture_root(tmp_path)
     db = root / "home/agent/.hermes/kanban.db"
     db.unlink()
     conn = sqlite3.connect(db)
-    assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() == "wal"
-    conn.execute("create table tasks(id text primary key, title text)")
-    conn.execute("insert into tasks values ('t_wal', 'WAL fixture')")
-    conn.commit()
-    conn.close()
-    for suffix in ("-wal", "-shm", "-journal"):
-        db.with_name(db.name + suffix).unlink(missing_ok=True)
-    assert db.read_bytes()[18:20] == b"\x02\x02"
-    before = sidecar_state(db)
+    try:
+        assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() == "wal"
+        conn.execute("PRAGMA wal_autocheckpoint=0")
+        conn.execute("create table tasks(id text primary key, title text)")
+        conn.execute("insert into tasks values ('t_wal', 'WAL fixture')")
+        conn.commit()
+        assert db.with_name(db.name + "-wal").exists()
+        assert db.with_name(db.name + "-shm").exists()
+        before = sidecar_state(db)
 
-    result = run_stage(tmp_path, "--keep", root=root)
-    output = combined(result)
+        result = run_stage(tmp_path, "--keep", root=root)
+        output = combined(result)
+        after = sidecar_state(db)
+    finally:
+        conn.close()
+
+    assert result.returncode == 0, output
+    assert_no_secrets(output)
+    assert after == before
+    staging_root = staging_root_from(output)
+    staged_db = staging_root / "home/agent/.hermes/kanban.db"
+    staged_conn = sqlite3.connect(staged_db)
+    try:
+        assert staged_conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert staged_conn.execute("select title from tasks where id='t_wal'").fetchone()[0] == "WAL fixture"
+    finally:
+        staged_conn.close()
+    assert not (staging_root / "home/agent/.hermes/kanban.db-wal").exists()
+    assert not (staging_root / "home/agent/.hermes/kanban.db-shm").exists()
+    metadata = json.loads((staging_root / "staging-metadata.json").read_text())
+    assert metadata["sqlite_wal_snapshot_backups"] == ["/home/agent/.hermes/kanban.db"]
+    assert metadata["counts"]["sqlite_wal_snapshot_backups"] == 1
+    assert metadata["counts"]["sqlite_snapshot_failures"] == 0
+    assert "status=wal-snapshot-backed-up" in output
+
+
+def test_stage_wal_snapshot_failure_is_bounded_and_actionable(tmp_path):
+    root = fixture_root(tmp_path)
+    db = root / "home/agent/.hermes/kanban.db"
+    db.unlink()
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() == "wal"
+        conn.execute("create table tasks(id text primary key, title text)")
+        conn.execute("insert into tasks values ('t_wal', 'WAL fixture')")
+        conn.commit()
+        result = run_stage(
+            tmp_path,
+            "--keep",
+            root=root,
+            extra_env={"FAKE_SQLITE_BACKUP_FAIL": "1", "HERMES_BACKUP_SQLITE_SNAPSHOT_ATTEMPTS": "2"},
+        )
+        output = combined(result)
+    finally:
+        conn.close()
 
     assert result.returncode != 0
-    assert "refusing to open WAL-mode SQLite source without quiesce/snapshot" in output
-    assert "/home/agent/.hermes/kanban.db" in output
-    assert sidecar_state(db) == before == {"-wal": None, "-shm": None, "-journal": None}
-    assert "sqlite path=/home/agent/.hermes/kanban.db status=backed-up" not in output
+    assert "SQLite snapshot failed after 2 attempt(s)" in output
+    assert "Retry later or temporarily stop the writer service" in output
+    assert output.count("status=snapshot-retry") == 1
     assert_no_secrets(output)
 
 

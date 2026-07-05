@@ -277,35 +277,47 @@ def test_backup_rejects_staging_root_under_live_include_root(tmp_path):
 
     assert result.returncode != 0
     assert "refusing staging root inside configured live include root" in output
-    assert "cleanup=removed-unsafe-staging-root staging_root=" in output
-    cleanup_line = next(line for line in output.splitlines() if line.startswith("cleanup=removed-unsafe-staging-root staging_root="))
-    assert not Path(cleanup_line.split("=", 2)[2]).exists()
+    assert "cleanup=removed-unsafe-staging-root staging_root=" not in output
+    assert not any(staging_parent.glob("stage-*"))
+    assert not any(staging_parent.glob("sqlite-snapshots-*"))
     assert not log_file.exists()
     assert_no_secret_values(output)
 
 
-def test_backup_removes_partial_staging_after_staging_failure_by_default(tmp_path):
+def test_backup_reaches_fake_restic_when_included_hermes_db_is_wal_mode(tmp_path):
+    bin_dir = fake_bin(tmp_path)
+    log_file = tmp_path / "restic.log"
+    add_fake_restic(bin_dir, log_file)
+    env_file, _ = write_local_config(tmp_path)
     root = fixture_root(tmp_path / "wal-root")
     db = root / "home/agent/.hermes/kanban.db"
     db.unlink()
     conn = sqlite3.connect(db)
-    assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() == "wal"
-    conn.execute("create table tasks(id text primary key, title text)")
-    conn.execute("insert into tasks values ('t_wal', 'WAL fixture')")
-    conn.commit()
-    conn.close()
-    for suffix in ("-wal", "-shm", "-journal"):
-        db.with_name(db.name + suffix).unlink(missing_ok=True)
+    try:
+        assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() == "wal"
+        conn.execute("PRAGMA wal_autocheckpoint=0")
+        conn.execute("create table tasks(id text primary key, title text)")
+        conn.execute("insert into tasks values ('t_wal', 'WAL fixture')")
+        conn.commit()
+        assert db.with_name(db.name + "-wal").exists()
 
-    result, log_file, _ = run_backup(tmp_path, "--root", str(root))
-    output = combined(result)
+        env = fake_backup_env(tmp_path, bin_dir, log_file)
+        result = subprocess.run(
+            [
+                "bash", str(SCRIPT), "--config-env", str(env_file), "--root", str(root),
+                "--staging-parent", str(tmp_path / "state" / "hermes-backup" / "staging"),
+            ],
+            cwd=ROOT, env=env, text=True, capture_output=True, check=False,
+        )
+        output = combined(result)
+    finally:
+        conn.close()
 
-    assert result.returncode != 0
-    assert "refusing to open WAL-mode SQLite source" in output
-    assert "cleanup=removed-after-staging-failure staging_root=" in output
-    cleanup_line = next(line for line in output.splitlines() if line.startswith("cleanup=removed-after-staging-failure staging_root="))
-    assert not Path(cleanup_line.split("=", 2)[2]).exists()
-    assert not log_file.exists()
+    assert result.returncode == 0, output
+    assert "backup=ok snapshot_id=fake-snapshot-id" in output
+    assert "refusing to open WAL-mode SQLite source" not in output
+    assert log_file.exists()
+    assert any(line.startswith("ARGS backup") for line in log_file.read_text().splitlines())
     assert_no_secret_values(output)
 
 

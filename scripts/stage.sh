@@ -29,6 +29,8 @@ ROOT_PREFIX=""
 STAGING_PARENT="${HERMES_BACKUP_STAGING_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/hermes-backup/staging}"
 KEEP_STAGING=0
 STAGING_ROOT=""
+SQLITE_SNAPSHOT_ROOT=""
+SQLITE_SNAPSHOT_MAX_ATTEMPTS="${HERMES_BACKUP_SQLITE_SNAPSHOT_ATTEMPTS:-3}"
 STATUS="failed"
 
 while [[ $# -gt 0 ]]; do
@@ -62,6 +64,9 @@ done
 
 cleanup() {
   local rc=$?
+  if [[ -n "$SQLITE_SNAPSHOT_ROOT" && -d "$SQLITE_SNAPSHOT_ROOT" ]]; then
+    rm -rf -- "$SQLITE_SNAPSHOT_ROOT"
+  fi
   if [[ "$rc" -eq 0 && "$STATUS" == "ok" && "$KEEP_STAGING" -eq 0 && -n "$STAGING_ROOT" && -d "$STAGING_ROOT" ]]; then
     rm -rf -- "$STAGING_ROOT"
     log "cleanup=removed staging_root=$STAGING_ROOT"
@@ -171,6 +176,46 @@ is_sqlite_wal_mode() {
   [[ "$first_byte" == "2" || "$second_byte" == "2" ]]
 }
 
+sqlite_sidecar_exists() {
+  local fs_path=$1 suffix
+  for suffix in -wal -shm -journal; do
+    [[ ! -e "${fs_path}${suffix}" ]] || return 0
+  done
+  return 1
+}
+
+sqlite_snapshot_state() {
+  local fs_path=$1 suffix sidecar
+  for suffix in '' -wal -shm -journal; do
+    sidecar="${fs_path}${suffix}"
+    if [[ -e "$sidecar" ]]; then
+      [[ ! -L "$sidecar" && -f "$sidecar" ]] || return 1
+      printf '%s\t' "${suffix:-main}"
+      stat -c '%s:%y:%i' -- "$sidecar" || return 1
+    else
+      printf '%s\tmissing\n' "${suffix:-main}"
+    fi
+  done
+}
+
+copy_sqlite_snapshot_once() {
+  local source_db=$1 snapshot_db=$2 before_state after_state suffix sidecar snapshot_sidecar
+  rm -f -- "$snapshot_db" "$snapshot_db-wal" "$snapshot_db-shm" "$snapshot_db-journal"
+  before_state="$(sqlite_snapshot_state "$source_db")" || return 2
+  cp -p -- "$source_db" "$snapshot_db" || return 2
+  for suffix in -wal -shm -journal; do
+    sidecar="${source_db}${suffix}"
+    snapshot_sidecar="${snapshot_db}${suffix}"
+    if [[ -e "$sidecar" ]]; then
+      cp -p -- "$sidecar" "$snapshot_sidecar" || return 2
+    else
+      rm -f -- "$snapshot_sidecar"
+    fi
+  done
+  after_state="$(sqlite_snapshot_state "$source_db")" || return 2
+  [[ "$before_state" == "$after_state" ]] || return 3
+}
+
 relative_without_leading_slash() {
   local live_path=$1
   printf '%s\n' "${live_path#/}"
@@ -182,6 +227,45 @@ json_escape() {
   value=${value//"/\\"}
   value=${value//$'\n'/\\n}
   printf '%s' "$value"
+}
+
+sqlite_shell_quote() {
+  local value=$1
+  [[ "$value" != *$'\n'* ]] || return 1
+  value=${value//\\/\\\\}
+  value=${value//"/\\"}
+  printf '"%s"' "$value"
+}
+
+canonicalize_path_allow_missing() {
+  local path=$1 probe suffix base
+  probe=$path
+  suffix=""
+  while [[ ! -e "$probe" && "$probe" != "/" ]]; do
+    base="$(basename -- "$probe")"
+    suffix="/$base$suffix"
+    probe="$(dirname -- "$probe")"
+  done
+  if [[ -e "$probe" ]]; then
+    probe="$(cd -P -- "$probe" && pwd -P)"
+    printf '%s%s\n' "$probe" "$suffix"
+  else
+    printf '%s\n' "$path"
+  fi
+}
+
+is_under_configured_live_root() {
+  local candidate=$1 live_root fs_root
+  for live_root in "${includes[@]}"; do
+    fs_root="$(map_to_fs_path "$live_root")"
+    if [[ -e "$fs_root" ]]; then
+      fs_root="$(cd -P -- "$fs_root" && pwd -P)"
+    fi
+    case "$candidate" in
+      "$fs_root"|"$fs_root"/*) return 0 ;;
+    esac
+  done
+  return 1
 }
 
 metadata_array() {
@@ -213,21 +297,37 @@ done
 
 command -v rsync >/dev/null 2>&1 || fail "rsync is required for staging copies"
 command -v sqlite3 >/dev/null 2>&1 || fail "sqlite3 is required for SQLite-safe backups"
+case "$SQLITE_SNAPSHOT_MAX_ATTEMPTS" in
+  ''|*[!0-9]*) fail "HERMES_BACKUP_SQLITE_SNAPSHOT_ATTEMPTS must be a positive integer" ;;
+esac
+[[ "$SQLITE_SNAPSHOT_MAX_ATTEMPTS" -ge 1 ]] || fail "HERMES_BACKUP_SQLITE_SNAPSHOT_ATTEMPTS must be at least 1"
 
 [[ -d "$STAGING_PARENT" || ! -e "$STAGING_PARENT" ]] || fail "staging parent is not a directory: $STAGING_PARENT"
+STAGING_PARENT_CANONICAL="$(canonicalize_path_allow_missing "$STAGING_PARENT")"
+if is_under_configured_live_root "$STAGING_PARENT_CANONICAL"; then
+  fail "refusing staging root inside configured live include root: $STAGING_PARENT_CANONICAL"
+fi
 mkdir -p -- "$STAGING_PARENT"
 chmod 700 "$STAGING_PARENT" 2>/dev/null || true
 STAGING_PARENT="$(cd -- "$STAGING_PARENT" && pwd -P)"
 STAGING_ROOT="$(mktemp -d "$STAGING_PARENT/stage-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")"
 chmod 700 "$STAGING_ROOT" 2>/dev/null || true
+SQLITE_SNAPSHOT_ROOT="$(mktemp -d "$STAGING_PARENT/sqlite-snapshots-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")"
+chmod 700 "$SQLITE_SNAPSHOT_ROOT" 2>/dev/null || true
 
 skipped_paths=()
 sqlite_paths=()
+sqlite_clean_paths=()
+sqlite_wal_snapshot_paths=()
 non_sqlite_candidates=()
 missing_roots=()
 include_roots_staged=0
 rsync_files=0
 sqlite_backups=0
+sqlite_clean_backups=0
+sqlite_wal_snapshot_backups=0
+sqlite_snapshot_retries=0
+sqlite_snapshot_failures=0
 
 log "Hermes backup SQLite-safe staging"
 log "manifest_dir=$MANIFEST_DIR"
@@ -312,19 +412,49 @@ for live_root in "${includes[@]}"; do
       log "sqlite-candidate path=$live_candidate status=not-sqlite-copied-raw"
       continue
     fi
-    if is_sqlite_wal_mode "$candidate"; then
-      fail "refusing to open WAL-mode SQLite source without quiesce/snapshot: $live_candidate"
-    fi
     rm -f -- "$dest_db" "$dest_db-wal" "$dest_db-shm" "$dest_db-journal"
-    if ! sqlite3 -readonly "$candidate" ".backup '$dest_db'" >/dev/null 2>&1; then
-      rm -f -- "$dest_db"
-      fail "sqlite backup failed for path: $live_candidate"
+    snapshot_kind=clean
+    if is_sqlite_wal_mode "$candidate" || sqlite_sidecar_exists "$candidate"; then
+      snapshot_kind=wal
     fi
-    integrity_result="$(sqlite3 "$dest_db" 'PRAGMA integrity_check;' 2>&1)" || fail "integrity_check failed for staged SQLite path: $live_candidate"
-    [[ "$integrity_result" == "ok" ]] || fail "integrity_check returned non-ok for staged SQLite path: $live_candidate"
+    snapshot_dir="$(mktemp -d "$SQLITE_SNAPSHOT_ROOT/db.XXXXXX")"
+    snapshot_db="$snapshot_dir/$(basename -- "$candidate")"
+    backup_dest_arg="$(sqlite_shell_quote "$dest_db")" || fail "SQLite backup destination contains unsupported newline for path: $live_candidate"
+    attempt=1
+    snapshot_ok=0
+    while [[ "$attempt" -le "$SQLITE_SNAPSHOT_MAX_ATTEMPTS" ]]; do
+      rm -f -- "$dest_db" "$dest_db-wal" "$dest_db-shm" "$dest_db-journal"
+      snapshot_copy_status=0
+      copy_sqlite_snapshot_once "$candidate" "$snapshot_db" || snapshot_copy_status=$?
+      if [[ "$snapshot_copy_status" -eq 0 ]] && sqlite3 "$snapshot_db" ".backup main $backup_dest_arg" >/dev/null 2>&1; then
+        if integrity_result="$(sqlite3 "$dest_db" 'PRAGMA integrity_check;' 2>&1)" && [[ "$integrity_result" == "ok" ]]; then
+          snapshot_ok=1
+          break
+        fi
+      fi
+      rm -f -- "$dest_db" "$dest_db-wal" "$dest_db-shm" "$dest_db-journal"
+      if [[ "$attempt" -lt "$SQLITE_SNAPSHOT_MAX_ATTEMPTS" ]]; then
+        sqlite_snapshot_retries=$((sqlite_snapshot_retries + 1))
+        log "sqlite path=$live_candidate status=snapshot-retry kind=$snapshot_kind attempt=$attempt max=$SQLITE_SNAPSHOT_MAX_ATTEMPTS"
+      fi
+      attempt=$((attempt + 1))
+    done
+    if [[ "$snapshot_ok" -ne 1 ]]; then
+      rm -f -- "$dest_db" "$dest_db-wal" "$dest_db-shm" "$dest_db-journal"
+      sqlite_snapshot_failures=$((sqlite_snapshot_failures + 1))
+      fail "SQLite snapshot failed after $SQLITE_SNAPSHOT_MAX_ATTEMPTS attempt(s) for path: $live_candidate; database changed during snapshot, sidecars were unsafe, or snapshot was inconsistent. Retry later or temporarily stop the writer service, then run backup again."
+    fi
     sqlite_paths+=("$live_candidate")
     sqlite_backups=$((sqlite_backups + 1))
-    log "sqlite path=$live_candidate status=backed-up integrity=ok"
+    if [[ "$snapshot_kind" == "wal" ]]; then
+      sqlite_wal_snapshot_paths+=("$live_candidate")
+      sqlite_wal_snapshot_backups=$((sqlite_wal_snapshot_backups + 1))
+      log "sqlite path=$live_candidate status=wal-snapshot-backed-up attempts=$attempt integrity=ok"
+    else
+      sqlite_clean_paths+=("$live_candidate")
+      sqlite_clean_backups=$((sqlite_clean_backups + 1))
+      log "sqlite path=$live_candidate status=clean-snapshot-backed-up attempts=$attempt integrity=ok"
+    fi
   done < <(find "$fs_root" -type f \( -iname '*.db' -o -iname '*.sqlite' -o -iname '*.sqlite3' -o -iname '*.db3' -o -iname '*-wal' -o -iname '*-shm' -o -iname '*-journal' \) -print0 2>/dev/null)
 done
 
@@ -352,9 +482,11 @@ exclude_sha="$(sha256sum "$EXCLUDE_MANIFEST" | awk '{print $1}')"
   metadata_array "include_roots" "${includes[@]}"; printf ',\n'
   metadata_array "missing_roots" "${missing_roots[@]}"; printf ',\n'
   metadata_array "sqlite_backups" "${sqlite_paths[@]}"; printf ',\n'
+  metadata_array "sqlite_clean_backups" "${sqlite_clean_paths[@]}"; printf ',\n'
+  metadata_array "sqlite_wal_snapshot_backups" "${sqlite_wal_snapshot_paths[@]}"; printf ',\n'
   metadata_array "non_sqlite_candidates" "${non_sqlite_candidates[@]}"; printf ',\n'
   metadata_array "skipped_paths" "${skipped_paths[@]}"; printf ',\n'
-  printf '  "counts": {"include_roots_staged": %s, "rsync_files": %s, "sqlite_backups": %s}\n' "$include_roots_staged" "$rsync_files" "$sqlite_backups"
+  printf '  "counts": {"include_roots_staged": %s, "rsync_files": %s, "sqlite_backups": %s, "sqlite_clean_backups": %s, "sqlite_wal_snapshot_backups": %s, "sqlite_snapshot_retries": %s, "sqlite_snapshot_failures": %s}\n' "$include_roots_staged" "$rsync_files" "$sqlite_backups" "$sqlite_clean_backups" "$sqlite_wal_snapshot_backups" "$sqlite_snapshot_retries" "$sqlite_snapshot_failures"
   printf '}\n'
 } >"$metadata_path"
 chmod 600 "$metadata_path" 2>/dev/null || true
