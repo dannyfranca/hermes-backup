@@ -1,6 +1,6 @@
 # Bootstrap baseline
 
-This document defines the bootstrap contract for the foundation implementation tickets. The current scheduler path includes the safe one-command install skeleton, local config/secret prompt writer, offline preflight composition, and backup/check/restore-drill user systemd unit rendering. Timers are disabled by default; `./install.sh --enable-timers` enables the backup/check/restore-drill timer symlinks through the same verification gate, without `--now`. It does not install packages, initialize restic, call B2/Telegram, run backup/restore/drill behavior, or use Hermes cron.
+This document defines the bootstrap contract for the foundation implementation tickets. The current scheduler path includes the safe install skeleton, local config/secret prompt writer, offline preflight composition, backup/check/restore-drill user systemd unit rendering, and an explicit first-run activation/check command. Timers are disabled by default; `scripts/activate.sh --first-backup --first-check --enable-timers` enables the backup/check/restore-drill timer symlinks only after first backup/check verification, without `--now`. `./install.sh` itself does not install packages, initialize restic, call B2/Telegram, run backup/restore/drill behavior, or use Hermes cron.
 
 ## Required offline verification harness
 
@@ -28,7 +28,7 @@ The skeleton runs in this order:
 2. Local state/log/staging, safe restore, and systemd user unit directory setup.
 3. `scripts/configure.sh` only when local config files do not already exist; otherwise reuse the existing chmod-600 local config.
 4. Render backup/check/restore-drill unit files from `systemd/user/` into `~/.config/systemd/user/` and run `systemctl --user daemon-reload`.
-5. Leave timers disabled by default, or enable only the approved user timers when `--enable-timers` is passed after local scheduler verification.
+5. Leave timers disabled by default. Use `scripts/activate.sh` after local secrets exist for repository init/check, optional Telegram test, first backup/check, and timer enablement after verification.
 
 Default local paths:
 
@@ -102,14 +102,25 @@ scripts/configure.sh --config-dir /absolute/test/config/dir --non-interactive
 
 Use obvious dummy values in non-interactive mode. Do not pass real secrets through chat, CI logs, shell history, GitHub, or committed files.
 
+## Explicit first-run activation/check
+
+After `./install.sh` has written local config from local prompts, run the activation command from a local terminal:
+
+```bash
+scripts/activate.sh --init-restic --telegram-test --first-backup --first-check --enable-timers
+```
+
+The command first runs offline preflight plus local chmod-600 config/password-file checks. Then it verifies restic; `--init-restic` initializes only when the repository looks uninitialized, `--telegram-test` sends one raw Telegram setup-test, `--first-backup` runs one backup, `--first-check` runs one check, and `--enable-timers` is allowed only after `--first-backup` plus `--first-check` succeed in the same run.
+
+Timer enablement delegates to `./install.sh --enable-timers`, which uses `systemctl --user enable` without `--now`; it does not start timer units. Start current-session timers manually only after accepting systemd catch-up behavior. Add `--dry-run` for a side-effect-free preview. Output is paths/status and redacted diagnostics only; it must not print B2 keys, restic passwords, Telegram credentials, repository URLs, file contents, or backup archives.
+
 ## Remaining bootstrap goals
 
-This scheduler path now renders concrete backup/check/restore-drill user systemd units and can enable those timer symlinks through `./install.sh --enable-timers`. Remaining bootstrap work should extend install only after the backing behavior exists:
+This scheduler path now renders concrete backup/check/restore-drill user systemd units and can enable those timer symlinks through the explicit activation gate. Remaining bootstrap work should extend install/activation only after the backing behavior exists:
 
 1. Install missing required local tools when explicitly approved.
-2. Initialize or verify the restic repository.
-3. Run first-use backup/check/drill/Telegram verification.
-4. Activate timer units in the current user manager session only after first-use verification and operator acceptance of systemd persistent catch-up behavior.
+2. Add broader first-use drill verification if needed.
+3. Activate timer units in the current user manager session only after first-use verification and operator acceptance of systemd persistent catch-up behavior.
 
 ## Dependency preflight
 
@@ -170,12 +181,12 @@ systemctl --user list-timers --all 'hermes-backup-*'
 systemctl --user status hermes-backup-backup.service hermes-backup-check.service hermes-backup-restore-drill.service
 ```
 
-Timers are not enabled by default. `./install.sh --enable-timers` enables only the approved backup/check/restore-drill timer units through the same local unit/config verification gate. It intentionally uses `systemctl --user enable` without `--now`, so install does not start persistent timers or dispatch missed backup/check/drill runs. `--enable-timers` cannot be combined with `--systemd-user-dir`; custom unit dirs are for tests/staging renders only, so enablement always targets the default user manager path.
+Timers are not enabled by default. `scripts/activate.sh --first-backup --first-check --enable-timers` is the recommended first-run path because it enables only the approved backup/check/restore-drill timer units after first backup/check verification. It intentionally uses `systemctl --user enable` without `--now`, so activation does not start persistent timers or dispatch missed backup/check/drill runs. Custom unit dirs remain for tests/staging renders only; enablement always targets the default user manager path through the installer gate.
 
 ## Downstream behavior not implemented here
 
 - No live promote commands.
 - `install.sh` does not run backup/check/restore/promote/drill commands.
 - No package installation.
-- No network validation against B2, restic, or Telegram.
-- No restic repository initialization.
+- No network validation against B2, restic, or Telegram from install.
+- No restic repository initialization from install; initialization exists only behind `scripts/activate.sh --init-restic` after local secrets exist.
