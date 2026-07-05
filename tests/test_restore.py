@@ -133,6 +133,12 @@ def test_restore_latest_defaults_to_non_live_safe_restore_root_and_verifies_path
     assert_no_secret_values(output)
     target = target_from_output(output)
     assert target == tmp_path / "home" / "agent" / "restore" / "hermes-vm-backup" / "latest"
+    marker = target / ".hermes-backup-restore.json"
+    assert marker.is_file()
+    marker_text = marker.read_text()
+    assert '"tool":"restore.sh"' in marker_text
+    assert '"mode":"non-live-inspection-only"' in marker_text
+    assert '"promote":"false"' in marker_text
     assert "snapshot=latest" in output
     assert "verify path=/home/agent/.hermes status=present" in output
     assert "verify path=/home/agent/shared status=present" in output

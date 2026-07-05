@@ -27,6 +27,7 @@ USAGE
 
 log() { printf '%s\n' "$*"; }
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
+RESTORE_MARKER_NAME=".hermes-backup-restore.json"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
@@ -214,6 +215,17 @@ materialize_restored_layout() {
   fi
 }
 
+write_restore_marker() {
+  local target=$1 snapshot=$2 marker_tmp marker
+  marker="$target/$RESTORE_MARKER_NAME"
+  marker_tmp="$marker.tmp.$$"
+  cat >"$marker_tmp" <<EOF
+{"tool":"restore.sh","mode":"non-live-inspection-only","snapshot":"$snapshot","promote":"false","schema_version":1}
+EOF
+  chmod 600 "$marker_tmp" 2>/dev/null || true
+  mv -- "$marker_tmp" "$marker"
+}
+
 INCLUDE_MANIFEST="$MANIFEST_DIR/include.paths"
 EXCLUDE_MANIFEST="$MANIFEST_DIR/exclude.patterns"
 validate_snapshot_selector "$SNAPSHOT"
@@ -285,6 +297,7 @@ if ! run_restic "${RESTIC_RESTORE_ARGS[@]}" >"$restore_output" 2>&1; then
 fi
 rm -f -- "$restore_output"
 materialize_restored_layout "$RAW_RESTORE_TARGET" "$RESTORE_TARGET" "$INCLUDE_MANIFEST"
+write_restore_marker "$RESTORE_TARGET" "$SNAPSHOT"
 log "restore=ok"
 
 present=0
