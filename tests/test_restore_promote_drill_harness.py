@@ -188,10 +188,14 @@ def add_fake_systemctl(bin_dir: Path, log_file: Path) -> None:
         sys.exit(2)
         ''',
     )
+    make_executable(
+        bin_dir / "ps",
+        "#!/usr/bin/env python3\n",
+    )
 
 
 def add_forbidden_command_fakes(bin_dir: Path) -> None:
-    for command in ["b2", "crontab", "hermes"]:
+    for command in ["b2", "crontab", "hermes", "kill", "pkill", "killall"]:
         make_executable(
             bin_dir / command,
             r'''
@@ -362,7 +366,11 @@ def test_end_to_end_fake_restore_drill_and_promote_safety_harness(tmp_path, requ
     assert "dry_run=ok no_live_paths_changed=true" in dry_output
     assert snapshot_tree(live_paths) == live_tree_before
     assert not curl_log.exists()
-    assert not systemctl_log.exists()
+    dry_systemctl_lines = systemctl_log.read_text().splitlines()
+    assert dry_systemctl_lines
+    assert all(line.startswith("--user ") for line in dry_systemctl_lines)
+    assert all(" stop " not in f" {line} " and " daemon-reload" not in line for line in dry_systemctl_lines)
+    systemctl_log.unlink()
     assert restic_log.read_text() == restic_after_restore
     assert_no_secret_values(dry_output)
 
@@ -432,6 +440,7 @@ def test_end_to_end_fake_restore_drill_and_promote_safety_harness(tmp_path, requ
     assert all(
         line in {
             "--user list-units",
+            "--user list-units --type=service --state=active --all --no-legend --plain hermes*.service",
             "--user is-active --quiet hermes-gateway.service",
             "--user is-active --quiet hermes-dashboard.service",
             "--user daemon-reload",

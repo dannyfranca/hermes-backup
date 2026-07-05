@@ -41,21 +41,93 @@ def fixture(tmp_path: Path, paths=None):
     return live, restore, backup, man
 
 
-def fake_systemctl(tmp_path: Path):
-    bin_dir = tmp_path / "bin"; bin_dir.mkdir()
+def fake_systemctl(tmp_path: Path, active_units=None, unavailable=False, stubborn_stop=False, list_fail=False):
+    active_units = active_units if active_units is not None else ["hermes-gateway.service"]
+    bin_dir = tmp_path / "bin"; bin_dir.mkdir(exist_ok=True)
     log = tmp_path / "systemctl.log"
+    state = tmp_path / "systemctl-state.txt"
+    state.write_text("\n".join(active_units) + ("\n" if active_units else ""))
     make_executable(bin_dir / "systemctl", r'''
         #!/usr/bin/env python3
-        import os, sys
+        import fnmatch, os, sys
         from pathlib import Path
         args = sys.argv[1:]
         Path(os.environ["FAKE_SYSTEMCTL_LOG"]).open("a").write(" ".join(args) + "\n")
-        if args[:2] == ["--user", "list-units"]: sys.exit(0)
-        if args[:3] == ["--user", "is-active", "--quiet"]: sys.exit(0 if args[3] == "hermes-gateway.service" else 3)
-        if args[:2] in (["--user", "stop"], ["--user", "daemon-reload"]): sys.exit(0)
+        if os.environ.get("FAKE_SYSTEMCTL_UNAVAILABLE") == "1":
+            sys.exit(1)
+        state = Path(os.environ["FAKE_SYSTEMCTL_STATE"])
+        active = [line.strip() for line in state.read_text().splitlines() if line.strip()]
+        if args[:2] == ["--user", "list-units"]:
+            if os.environ.get("FAKE_SYSTEMCTL_LIST_FAIL") == "1" and any(arg.startswith("hermes") for arg in args[2:]):
+                sys.exit(41)
+            pattern = next((arg for arg in reversed(args) if "*" in arg or arg.endswith(".service")), "*")
+            for unit in active:
+                if fnmatch.fnmatch(unit, pattern):
+                    print(f"{unit} loaded active running fake")
+            sys.exit(0)
+        if args[:3] == ["--user", "is-active", "--quiet"]:
+            sys.exit(0 if args[3] in active else 3)
+        if args[:2] == ["--user", "stop"]:
+            unit = args[2]
+            if os.environ.get("FAKE_SYSTEMCTL_STUBBORN_STOP") != "1":
+                active = [u for u in active if u != unit]
+                state.write_text("\n".join(active) + ("\n" if active else ""))
+            sys.exit(0)
+        if args[:2] == ["--user", "daemon-reload"]:
+            sys.exit(0)
         sys.exit(2)
     ''')
-    return bin_dir, log
+    ps_log = tmp_path / "ps.log"
+    termination_log = tmp_path / "termination.log"
+    make_executable(
+        bin_dir / "ps",
+        "#!/usr/bin/env python3\n"
+        "from pathlib import Path\n"
+        "import os\n"
+        "Path(os.environ['FAKE_PS_LOG']).open('a').write('ps called\\n')\n",
+    )
+    for command in ["kill", "pkill", "killall"]:
+        make_executable(
+            bin_dir / command,
+            "#!/usr/bin/env python3\n"
+            "from pathlib import Path\n"
+            "import os, sys\n"
+            "Path(os.environ['FAKE_TERMINATION_LOG']).open('a').write(sys.argv[0] + ' ' + ' '.join(sys.argv[1:]) + '\\n')\n"
+            "sys.exit(98)\n",
+        )
+    env = {"FAKE_SYSTEMCTL_LOG": str(log), "FAKE_SYSTEMCTL_STATE": str(state), "FAKE_PS_LOG": str(ps_log), "FAKE_TERMINATION_LOG": str(termination_log)}
+    if unavailable:
+        env["FAKE_SYSTEMCTL_UNAVAILABLE"] = "1"
+    if stubborn_stop:
+        env["FAKE_SYSTEMCTL_STUBBORN_STOP"] = "1"
+    if list_fail:
+        env["FAKE_SYSTEMCTL_LIST_FAIL"] = "1"
+    return bin_dir, log, env
+
+
+def fake_ps(tmp_path: Path, rows):
+    bin_dir = tmp_path / "bin"; bin_dir.mkdir(exist_ok=True)
+    log = tmp_path / "ps.log"
+    ps_output = "\n".join(rows) + ("\n" if rows else "")
+    make_executable(
+        bin_dir / "ps",
+        "#!/usr/bin/env python3\n"
+        "from pathlib import Path\n"
+        "import os\n"
+        "Path(os.environ['FAKE_PS_LOG']).open('a').write('ps called\\n')\n"
+        f"print({ps_output!r}, end='')\n",
+    )
+    termination_log = tmp_path / "termination.log"
+    for command in ["kill", "pkill", "killall"]:
+        make_executable(
+            bin_dir / command,
+            "#!/usr/bin/env python3\n"
+            "from pathlib import Path\n"
+            "import os, sys\n"
+            "Path(os.environ['FAKE_TERMINATION_LOG']).open('a').write(sys.argv[0] + ' ' + ' '.join(sys.argv[1:]) + '\\n')\n"
+            "sys.exit(98)\n",
+        )
+    return bin_dir, log, {"FAKE_PS_LOG": str(log), "FAKE_TERMINATION_LOG": str(termination_log)}
 
 
 def run(*args, env=None):
@@ -97,8 +169,10 @@ def test_promote_requires_explicit_restore_path_and_confirmation(tmp_path):
 
 def test_dry_run_validates_layout_without_changing_live_paths(tmp_path):
     live, restore, backup, man = fixture(tmp_path)
+    bin_dir, _, probe_env = fake_systemctl(tmp_path, active_units=[])
+    env = {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH','')}", **probe_env}
     before = (live / "home/agent/.hermes/current.txt").read_text()
-    result = run(*args(live, backup, man, restore, "--dry-run"))
+    result = run(*args(live, backup, man, restore, "--dry-run"), env=env)
     output = combined(result)
     assert result.returncode == 0, output
     assert "mode=dry-run promote=false" in output and "dry_run=ok no_live_paths_changed=true" in output
@@ -120,8 +194,19 @@ def test_refuses_unmarked_arbitrary_and_live_overlapping_restore_paths(tmp_path)
 def test_confirmed_promote_backs_up_before_replacing_and_reloads_systemd(tmp_path):
     live, restore, backup, man = fixture(tmp_path, ["/home/agent/.hermes", "/home/agent/shared"])
     (restore / "home/agent/.hermes").chmod(0o700)
-    bin_dir, log = fake_systemctl(tmp_path)
-    env = {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH','')}", "FAKE_SYSTEMCTL_LOG": str(log)}
+    bin_dir, log, systemctl_env = fake_systemctl(tmp_path)
+    ps_seen = tmp_path / "ps-seen"
+    make_executable(
+        bin_dir / "ps",
+        "#!/usr/bin/env python3\n"
+        "from pathlib import Path\n"
+        "import os\n"
+        "seen = Path(os.environ['FAKE_PS_SEEN'])\n"
+        "if not seen.exists():\n"
+        "    seen.write_text('1')\n"
+        "    print('4321 hermes-gateway /usr/bin/hermes-gateway --serve')\n",
+    )
+    env = {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH','')}", **systemctl_env, "FAKE_PS_SEEN": str(ps_seen)}
     result = run(*args(live, backup, man, restore, "--yes", "--confirm", "PROMOTE-HERMES-RESTORE"), env=env)
     output = combined(result)
     assert result.returncode == 0, output; no_secrets(output)
@@ -131,7 +216,124 @@ def test_confirmed_promote_backs_up_before_replacing_and_reloads_systemd(tmp_pat
     assert (live / "home/agent/.hermes/restored.txt").read_text().startswith("new 0")
     assert stat.S_IMODE((live / "home/agent/.hermes").stat().st_mode) == 0o700
     assert output.index("backup live_path=/home/agent/.hermes") < output.index("promote live_path=/home/agent/.hermes")
+    assert "quiesce process_class=hermes-gateway pid=4321 command=hermes-gateway status=active action=covered-by-reviewed-service-stop" in output
     assert "--user stop hermes-gateway.service" in log.read_text() and "--user daemon-reload" in log.read_text()
+
+def test_dry_run_reports_quiesce_plan_without_stopping_services_or_mutating(tmp_path):
+    live, restore, backup, man = fixture(tmp_path, ["/home/agent/.hermes"])
+    bin_dir, log, systemctl_env = fake_systemctl(tmp_path, active_units=["hermes-gateway.service", "hermes-worker.service"])
+    env = {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH','')}", **systemctl_env}
+    before = (live / "home/agent/.hermes/current.txt").read_text()
+    result = run(*args(live, backup, man, restore, "--dry-run"), env=env)
+    output = combined(result)
+    assert result.returncode == 0, output; no_secrets(output)
+    assert "quiesce service=hermes-gateway.service status=active action=stop-reviewed-before-promote" in output
+    assert "quiesce service=hermes-worker.service status=active action=manual-stop-or-ack" in output
+    assert "systemd_user=stop unit=" not in output
+    assert (live / "home/agent/.hermes/current.txt").read_text() == before
+    assert not backup.exists()
+    assert "--user stop" not in log.read_text()
+
+
+def test_confirmed_promote_refuses_unreviewed_active_service_without_quiesce_ack(tmp_path):
+    live, restore, backup, man = fixture(tmp_path, ["/home/agent/.hermes"])
+    bin_dir, _, systemctl_env = fake_systemctl(tmp_path, active_units=["hermes-worker.service"])
+    env = {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH','')}", **systemctl_env}
+    before = (live / "home/agent/.hermes/current.txt").read_text()
+    result = run(*args(live, backup, man, restore, "--yes", "--confirm", "PROMOTE-HERMES-RESTORE"), env=env)
+    output = combined(result)
+    assert result.returncode != 0
+    assert "active or unverified Hermes services/processes remain" in output
+    assert "backup live_path=" not in output and "promote live_path=" not in output
+    assert not backup.exists()
+    assert (live / "home/agent/.hermes/current.txt").read_text() == before
+
+
+def test_confirmed_promote_refuses_mixed_blockers_before_stopping_reviewed_services(tmp_path):
+    live, restore, backup, man = fixture(tmp_path, ["/home/agent/.hermes"])
+    bin_dir, log, systemctl_env = fake_systemctl(tmp_path, active_units=["hermes-gateway.service", "hermes-worker.service"])
+    env = {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH','')}", **systemctl_env}
+    result = run(*args(live, backup, man, restore, "--yes", "--confirm", "PROMOTE-HERMES-RESTORE"), env=env)
+    output = combined(result)
+    assert result.returncode != 0
+    assert "quiesce service=hermes-worker.service status=active action=manual-stop-or-ack" in output
+    assert "systemd_user=stop unit=" not in output
+    assert "--user stop" not in log.read_text()
+    assert not backup.exists()
+
+
+def test_confirmed_promote_requires_ack_when_service_enumeration_fails(tmp_path):
+    live, restore, backup, man = fixture(tmp_path, ["/home/agent/.hermes"])
+    bin_dir, _, systemctl_env = fake_systemctl(tmp_path, active_units=[], list_fail=True)
+    env = {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH','')}", **systemctl_env}
+    result = run(*args(live, backup, man, restore, "--yes", "--confirm", "PROMOTE-HERMES-RESTORE"), env=env)
+    output = combined(result)
+    assert result.returncode != 0
+    assert "quiesce service_probe=systemd_user_list_units pattern=hermes*.service status=failed action=manual-check-or-ack" in output
+    assert "backup live_path=" not in output
+    assert not backup.exists()
+
+
+def test_confirmed_promote_refuses_reviewed_service_that_remains_active_after_stop(tmp_path):
+    live, restore, backup, man = fixture(tmp_path, ["/home/agent/.hermes"])
+    bin_dir, log, systemctl_env = fake_systemctl(tmp_path, active_units=["hermes-gateway.service"], stubborn_stop=True)
+    env = {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH','')}", **systemctl_env}
+    result = run(*args(live, backup, man, restore, "--yes", "--confirm", "PROMOTE-HERMES-RESTORE"), env=env)
+    output = combined(result)
+    assert result.returncode != 0
+    assert "quiesce service=hermes-gateway.service status=active action=stop-reviewed-before-promote" in output
+    assert "reviewed Hermes services remain active after stop" in output
+    assert "backup live_path=" not in output and "promote live_path=" not in output
+    assert not backup.exists()
+    assert "--user stop hermes-gateway.service" in log.read_text()
+
+
+def test_confirmed_promote_requires_ack_when_process_probe_fails(tmp_path):
+    live, restore, backup, man = fixture(tmp_path, ["/home/agent/.hermes"])
+    bin_dir, _, systemctl_env = fake_systemctl(tmp_path, active_units=[])
+    make_executable(bin_dir / "ps", "#!/usr/bin/env python3\nimport sys\nsys.exit(42)\n")
+    env = {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH','')}", **systemctl_env}
+    result = run(*args(live, backup, man, restore, "--yes", "--confirm", "PROMOTE-HERMES-RESTORE"), env=env)
+    output = combined(result)
+    assert result.returncode != 0
+    assert "quiesce process_probe=ps status=failed action=manual-check-or-ack" in output
+    assert "backup live_path=" not in output
+    assert not backup.exists()
+
+
+def test_confirmed_promote_requires_ack_for_active_hermes_processes_and_never_kills_them(tmp_path):
+    live, restore, backup, man = fixture(tmp_path, ["/home/agent/.hermes"])
+    systemctl_bin, _, systemctl_env = fake_systemctl(tmp_path, active_units=[])
+    ps_bin, ps_log, ps_env = fake_ps(tmp_path, ["4321 hermes-worker /usr/bin/hermes-worker --once"])
+    env = {"PATH": f"{ps_bin}{os.pathsep}{systemctl_bin}{os.pathsep}{os.environ.get('PATH','')}", **systemctl_env, **ps_env}
+    before = (live / "home/agent/.hermes/current.txt").read_text()
+    refused = run(*args(live, backup, man, restore, "--yes", "--confirm", "PROMOTE-HERMES-RESTORE"), env=env)
+    refused_output = combined(refused)
+    assert refused.returncode != 0
+    assert "quiesce process_class=hermes-worker pid=4321 command=hermes-worker status=active action=manual-stop-or-ack" in refused_output
+    assert (live / "home/agent/.hermes/current.txt").read_text() == before
+
+    accepted = run(*args(live, backup, man, restore, "--yes", "--confirm", "PROMOTE-HERMES-RESTORE", "--quiesce-ack", "PROMOTE-HERMES-QUIESCE"), env=env)
+    accepted_output = combined(accepted)
+    assert accepted.returncode == 0, accepted_output; no_secrets(accepted_output)
+    assert "quiesce=acknowledged" in accepted_output
+    assert (live / "home/agent/.hermes/restored.txt").read_text().startswith("new 0")
+    assert ps_log.read_text().count("ps called") >= 2
+    assert not Path(ps_env["FAKE_TERMINATION_LOG"]).exists()
+    assert "kill" not in accepted_output.lower()
+
+
+def test_confirmed_promote_requires_ack_when_systemd_probe_unavailable(tmp_path):
+    live, restore, backup, man = fixture(tmp_path, ["/home/agent/.hermes"])
+    systemctl_bin, _, systemctl_env = fake_systemctl(tmp_path, unavailable=True)
+    ps_bin, _, ps_env = fake_ps(tmp_path, [])
+    env = {"PATH": f"{ps_bin}{os.pathsep}{systemctl_bin}{os.pathsep}{os.environ.get('PATH','')}", **systemctl_env, **ps_env}
+    result = run(*args(live, backup, man, restore, "--yes", "--confirm", "PROMOTE-HERMES-RESTORE"), env=env)
+    output = combined(result)
+    assert result.returncode != 0
+    assert "quiesce service_probe=systemd_user status=unavailable action=manual-check-or-ack" in output
+    assert "backup live_path=" not in output
+    assert not backup.exists()
 
 
 def test_refuses_symlinked_live_restore_and_restored_path_components(tmp_path):
