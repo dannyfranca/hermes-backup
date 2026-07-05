@@ -101,6 +101,21 @@ The gate runs `systemctl --user enable` without `--now` so install does not imme
 
 The installer never runs backup, check, restore, promote, drill, restic init, B2/Telegram network validation, or Hermes cron scheduling. The restore-drill timer points only at the already-reviewed safe drill command and never at `restore.sh` or `promote.sh` directly.
 
+## Recovery runbook and disaster checklist
+
+Use `docs/recovery-runbook.md` when rebuilding a fresh VM or validating disaster-recovery readiness. It contains the panic-mode checklist, password-manager prerequisites, safe restore steps, explicit promote procedure, monthly restore-drill interpretation, verification plan, and post-compromise credential-rotation checklist.
+
+The shortest safe recovery path is:
+
+1. Clone `dannyfranca/hermes-backup` onto the replacement VM.
+2. Run `scripts/preflight.sh --check` and `./install.sh` from a local terminal.
+3. Enter B2/restic/Telegram values only into local prompts from Danny's password manager.
+4. Run `scripts/restic-check.sh`.
+5. Run `scripts/restore.sh` and inspect the safe restore directory.
+6. Dry-run `scripts/promote.sh --dry-run <restore-dir>`.
+7. Run `scripts/promote.sh --yes --confirm PROMOTE-HERMES-RESTORE <restore-dir>` only after the restore has been verified.
+8. Run `./install.sh --enable-timers` after restore/promote verification, or after credential rotation if compromise is suspected. Start timer units manually only if current-session scheduling is desired and systemd catch-up behavior is acceptable, then verify user systemd timers, key restored paths, SQLite integrity, local logs, and raw Telegram drill reporting.
+
 ## Safe restore command
 
 Restore the latest restic snapshot into the default non-live inspection directory:
