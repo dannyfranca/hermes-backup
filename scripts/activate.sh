@@ -7,26 +7,10 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/activate.sh [options]
+Usage: scripts/activate.sh [--config-env PATH] [--init-restic] [--telegram-test] [--first-backup] [--first-check] [--enable-timers] [--dry-run]
+       [--backup-root PATH] [--manifest-dir PATH] [--staging-parent PATH]
 
-Explicit first-run setup verification after ./install.sh has created local config.
-Default mode checks packages/config only, then prints the operator activation sequence.
-
-Options:
-  --config-env PATH       Local chmod-600 env file (default: $HERMES_BACKUP_ENV or ~/.config/hermes-backup/hermes-backup.env)
-  --init-restic           If the configured repository is not initialized, run `restic init` before backup/check.
-  --telegram-test         Send one raw Telegram Bot API setup-test message using local credentials.
-  --first-backup          Run scripts/backup.sh once after repository verification/init.
-  --first-check           Run scripts/restic-check.sh once after the first backup step.
-  --enable-timers         Enable backup/check/restore-drill user timers only after --first-backup and --first-check succeed in this run.
-  --backup-root PATH      Test-only/live-fixture root passed to scripts/backup.sh --root.
-  --manifest-dir PATH     Test-only manifest directory passed to scripts/backup.sh --manifest-dir.
-  --staging-parent PATH   Test-only staging parent passed to scripts/backup.sh --staging-parent.
-  --dry-run               Validate local preflight/config and print requested steps without network/restic/curl/systemctl side effects.
-  -h, --help              Show this help.
-
-This command never prints B2 keys, restic passwords, Telegram credentials,
-repository URLs, file contents, or backup archives.
+Explicit first-run setup verification after ./install.sh creates local config. With no action flags, checks packages/config only. restic init, Telegram send, backup/check, and timer enablement require explicit flags; timer enablement also requires --first-backup and --first-check in the same run and uses systemctl enable without --now.
 USAGE
 }
 
@@ -38,19 +22,14 @@ mode_octal() {
   stat -c '%a' -- "$path" 2>/dev/null || stat -f '%Lp' -- "$path"
 }
 
-mode_is_0600_file() {
-  local path=$1 mode
-  mode="$(mode_octal "$path")"
-  [[ "$mode" == "600" ]]
-}
-
 validate_secret_file() {
-  local label=$1 path=$2
+  local label=$1 path=$2 mode
   [[ -n "$path" ]] || fail "$label path is required"
   case "$path" in /*) ;; *) fail "$label path must be absolute" ;; esac
   [[ ! -L "$path" ]] || fail "$label must not be a symlink: $path"
   [[ -f "$path" ]] || fail "$label not found or not a regular file: $path"
-  mode_is_0600_file "$path" || fail "$label permissions are unsafe; run chmod 600 '$path'"
+  mode="$(mode_octal "$path")"
+  [[ "$mode" == "600" ]] || fail "$label permissions are unsafe; run chmod 600 '$path'"
 }
 
 require_env() {
@@ -68,11 +47,6 @@ config_env_default() {
     [[ -n "${HOME:-}" ]] || fail "HOME must be set"
     printf '%s/.config/hermes-backup/hermes-backup.env\n' "$HOME"
   fi
-}
-
-redact_output_file() {
-  local path=$1
-  hb_redact_file "$path"
 }
 
 run_restic() {
@@ -116,14 +90,14 @@ verify_or_init_repository() {
 
   if [[ "$INIT_RESTIC" != "1" ]]; then
     printf 'restic_repository=unverified exit=%s\n' "$snapshots_rc" >&2
-    redact_output_file "$output_file" | sed -n '1,8p' >&2
+    hb_redact_file "$output_file" | sed -n '1,8p' >&2
     rm -f -- "$output_file"
     fail "restic repository is not reachable/initialized; rerun with --init-restic only if this is the expected first setup"
   fi
 
   if ! looks_uninitialized "$output_file"; then
     printf 'restic_repository=unverified exit=%s\n' "$snapshots_rc" >&2
-    redact_output_file "$output_file" | sed -n '1,8p' >&2
+    hb_redact_file "$output_file" | sed -n '1,8p' >&2
     rm -f -- "$output_file"
     fail "restic repository check failed for a reason other than missing initialization; refusing restic init"
   fi
@@ -137,7 +111,7 @@ verify_or_init_repository() {
   set -e
   if [[ "$init_rc" -ne 0 ]]; then
     printf 'restic_init=failed exit=%s\n' "$init_rc" >&2
-    redact_output_file "$init_output" | sed -n '1,8p' >&2
+    hb_redact_file "$init_output" | sed -n '1,8p' >&2
     rm -f -- "$init_output"
     fail "restic init failed"
   fi
@@ -151,7 +125,7 @@ verify_or_init_repository() {
   set -e
   if [[ "$snapshots_rc" -ne 0 ]]; then
     printf 'restic_repository=unverified-after-init exit=%s\n' "$snapshots_rc" >&2
-    redact_output_file "$output_file" | sed -n '1,8p' >&2
+    hb_redact_file "$output_file" | sed -n '1,8p' >&2
     rm -f -- "$output_file"
     fail "restic repository could not be verified after init"
   fi

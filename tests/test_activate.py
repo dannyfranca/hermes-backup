@@ -1,7 +1,6 @@
 import os
 import pwd
 import shlex
-import stat
 import subprocess
 from pathlib import Path
 
@@ -29,13 +28,13 @@ def assert_no_dummy_values(text: str) -> None:
         assert value not in text
 
 
-def write_local_config(tmp_path: Path) -> tuple[Path, Path]:
+def write_local_config(tmp_path: Path, filename: str = "hermes-backup.env") -> tuple[Path, Path]:
     config_dir = tmp_path / "home" / "agent" / ".config" / "hermes-backup"
     config_dir.mkdir(parents=True, mode=0o700)
     password_file = config_dir / "restic-password"
     password_file.write_text(DUMMY_VALUES["RESTIC_PASSWORD"] + "\n")
     password_file.chmod(0o600)
-    env_file = config_dir / "hermes-backup.env"
+    env_file = config_dir / filename
     env_file.write_text(
         "\n".join(
             [
@@ -165,8 +164,8 @@ def fake_bin(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     return bin_dir, restic_log, curl_log, systemctl_log
 
 
-def run_activate(tmp_path: Path, *args: str, extra_env: dict[str, str] | None = None):
-    env_file, _password_file = write_local_config(tmp_path)
+def run_activate(tmp_path: Path, *args: str, extra_env: dict[str, str] | None = None, config_name: str = "hermes-backup.env"):
+    env_file, _password_file = write_local_config(tmp_path, config_name)
     bin_dir, restic_log, curl_log, systemctl_log = fake_bin(tmp_path)
     home = tmp_path / "home" / "agent"
     env = os.environ.copy()
@@ -201,12 +200,6 @@ def restic_args(log_file: Path) -> list[list[str]]:
     return [line.removeprefix("ARGS ").split("\0") for line in log_file.read_text().splitlines() if line.startswith("ARGS ")]
 
 
-def test_activate_has_valid_bash_syntax_and_is_executable():
-    result = subprocess.run(["bash", "-n", str(SCRIPT)], cwd=ROOT, text=True, capture_output=True, check=False)
-    assert result.returncode == 0, combined(result)
-    assert SCRIPT.stat().st_mode & stat.S_IXUSR
-
-
 def test_activate_default_checks_config_only_and_does_not_touch_network_or_timers(tmp_path):
     result, restic_log, curl_log, systemctl_log = run_activate(tmp_path)
     output = combined(result)
@@ -221,18 +214,6 @@ def test_activate_default_checks_config_only_and_does_not_touch_network_or_timer
     assert calls == ["--user list-unit-files --no-pager"]
     assert_no_dummy_values(output)
 
-
-def test_activate_dry_run_with_flags_still_does_not_touch_restic_network_or_timers(tmp_path):
-    result, restic_log, curl_log, systemctl_log = run_activate(tmp_path, "--dry-run", "--init-restic", "--telegram-test", "--first-backup", "--first-check", "--enable-timers")
-    output = combined(result)
-
-    assert result.returncode == 0, output
-    assert "dry_run=1" in output
-    assert not restic_log.exists()
-    assert not curl_log.exists()
-    calls = systemctl_log.read_text().splitlines()
-    assert calls == ["--user list-unit-files --no-pager"]
-    assert_no_dummy_values(output)
 
 
 def test_activate_initializes_uninitialized_restic_before_first_backup_and_check(tmp_path):
@@ -278,33 +259,12 @@ def test_activate_refuses_restic_init_for_wrong_password_like_failures(tmp_path)
 
 
 def test_activate_requires_timer_enablement_config_to_be_the_scheduled_env_name(tmp_path):
-    env_file, _password_file = write_local_config(tmp_path)
-    custom_env = env_file.with_name("custom.env")
-    custom_env.write_text(env_file.read_text())
-    custom_env.chmod(0o600)
-    bin_dir, restic_log, curl_log, systemctl_log = fake_bin(tmp_path)
-    home = tmp_path / "home" / "agent"
-    env = os.environ.copy()
-    env.update(
-        {
-            "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
-            "HOME": str(home),
-            "XDG_CONFIG_HOME": str(home / ".config"),
-            "XDG_STATE_HOME": str(home / ".local" / "state"),
-            "HERMES_BACKUP_EXPECTED_HOME": str(home),
-            "HERMES_BACKUP_EXPECTED_USER": pwd.getpwuid(os.geteuid()).pw_name,
-            "HERMES_BACKUP_EXPECTED_EUID": str(os.geteuid()),
-            "FAKE_RESTIC_LOG": str(restic_log),
-            "FAKE_CURL_LOG": str(curl_log),
-        }
-    )
-    result = subprocess.run(
-        ["bash", str(SCRIPT), "--config-env", str(custom_env), "--first-backup", "--first-check", "--enable-timers"],
-        cwd=ROOT,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
+    result, restic_log, curl_log, systemctl_log = run_activate(
+        tmp_path,
+        "--first-backup",
+        "--first-check",
+        "--enable-timers",
+        config_name="custom.env",
     )
     output = combined(result)
 

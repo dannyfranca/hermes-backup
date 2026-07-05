@@ -110,25 +110,9 @@ After `./install.sh` has written local config from local prompts, run the activa
 scripts/activate.sh --init-restic --telegram-test --first-backup --first-check --enable-timers
 ```
 
-The activation command runs in this order:
+The command first runs offline preflight plus local chmod-600 config/password-file checks. Then it verifies restic; `--init-restic` initializes only when the repository looks uninitialized, `--telegram-test` sends one raw Telegram setup-test, `--first-backup` runs one backup, `--first-check` runs one check, and `--enable-timers` is allowed only after `--first-backup` plus `--first-check` succeed in the same run.
 
-1. Offline package/runtime preflight plus local chmod-600 config/password-file checks.
-2. Restic repository verification. If the repository looks uninitialized, `restic init` runs only when `--init-restic` is present.
-3. Raw Telegram Bot API setup-test message only when `--telegram-test` is present.
-4. First backup only when `--first-backup` is present.
-5. First repository check only when `--first-check` is present.
-6. Timer enablement only when `--enable-timers` is present and `--first-backup` plus `--first-check` succeeded in the same run.
-
-Timer enablement delegates to `./install.sh --enable-timers`, which uses `systemctl --user enable` without `--now`; it does not start timer units. Current-session timer starts remain manual so Danny can accept systemd catch-up behavior explicitly:
-
-```bash
-systemctl --user start hermes-backup-backup.timer hermes-backup-check.timer hermes-backup-restore-drill.timer
-systemctl --user list-timers --all 'hermes-backup-*'
-```
-
-For a side-effect-free preview, add `--dry-run`. Dry-run validates preflight/config and prints the requested steps without calling restic, curl, backup/check, or systemctl enable.
-
-The activation output prints only paths/status and redacted diagnostics. It must not print B2 keys, restic passwords, Telegram bot tokens/chat IDs, restic repository URLs, file contents, or backup archives.
+Timer enablement delegates to `./install.sh --enable-timers`, which uses `systemctl --user enable` without `--now`; it does not start timer units. Start current-session timers manually only after accepting systemd catch-up behavior. Add `--dry-run` for a side-effect-free preview. Output is paths/status and redacted diagnostics only; it must not print B2 keys, restic passwords, Telegram credentials, repository URLs, file contents, or backup archives.
 
 ## Remaining bootstrap goals
 
