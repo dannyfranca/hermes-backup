@@ -266,6 +266,16 @@ Promote only after the safe restore has been inspected and Hermes activity is qu
 
 5. Keep the printed pre-promotion backup path. It is the rollback point for the previous live state.
 
+6. If promote fails, is interrupted, or the terminal disconnects after the script prints `promote_recovery_checkpoint=...`, keep Hermes services quiesced and use the printed rollback command after inspecting the VM. The command shape is:
+
+   ```bash
+   scripts/promote.sh --manifest-dir <manifest-dir> --live-root / --rollback "<pre-promotion-backup>" --yes --confirm PROMOTE-HERMES-ROLLBACK
+   ```
+
+   Rollback restores each include root from the checkpointed pre-promotion backup, removes roots that were originally missing, reloads user systemd state when available, and prints the same post-rollback service restart checklist. If you prefer to continue with the restored snapshot instead, rerun the confirmed promote from a clean shell after inspecting the checkpoint and live paths.
+
+7. After rollback or a successful rerun, restart only intended Hermes services after review; do not broadly restart or kill unrelated user processes.
+
 Promote may stop only the reviewed service allowlist, replace configured live include roots, reload user systemd state, and print a post-promote checklist. It must not run from install, restore, timers, backup, check, or drill paths.
 
 ## 7. Post-promote verification checklist
