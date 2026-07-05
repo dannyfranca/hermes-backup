@@ -17,8 +17,8 @@ Required guardrails:
   * RESTORE_DIR must be an absolute path and must contain restored include roots.
   * RESTORE_DIR must not overlap live include paths.
   * Mutating mode requires both --yes and --confirm PROMOTE-HERMES-RESTORE.
-  * --dry-run prints the planned backup/promote and quiesce actions without changing live paths.
-  * Confirmed promote stops only reviewed Hermes user-service units.
+  * --dry-run prints the planned backup/promote, symlink audit, and quiesce actions without changing live paths.
+  * Confirmed promote prints the same symlink audit before stopping services or replacing live paths.
   * If other active Hermes services/processes are detected, pass --quiesce-ack PROMOTE-HERMES-QUIESCE only after manually quiescing or accepting the risk.
   * A local pre-promotion backup is created before any live path is replaced.
   * Confirmed promote writes a recovery checkpoint inside that backup directory.
@@ -218,6 +218,116 @@ refuse_symlinked_path_components() {
     current="$current/$part"
     [[ ! -L "$current" ]] || fail "$label must not contain symlinked path components: $current"
   done
+}
+
+is_systemd_wants_symlink() {
+  local display_path=$1
+  case "$display_path" in
+    /home/agent/.config/systemd/user/*.wants/*|/home/agent/.config/systemd/user/*.requires/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_expected_absolute_systemd_user_target() {
+  local target=$1 normalized
+  [[ "$target" == /* ]] || return 1
+  normalized="$(lexical_normalize_absolute_path "$target")"
+  is_same_or_descendant "$normalized" "/home/agent/.config/systemd/user"
+}
+
+lexical_normalize_absolute_path() {
+  local path=$1 part
+  local -a input_parts output_parts=()
+  [[ "$path" == /* ]] || fail "internal lexical path normalization requires an absolute path: $path"
+  IFS=/ read -r -a input_parts <<< "${path#/}"
+  for part in "${input_parts[@]}"; do
+    case "$part" in
+      ""|.) ;;
+      ..)
+        if [[ "${#output_parts[@]}" -gt 0 ]]; then
+          unset 'output_parts[${#output_parts[@]}-1]'
+        fi
+        ;;
+      *) output_parts+=("$part") ;;
+    esac
+  done
+  if [[ "${#output_parts[@]}" -eq 0 ]]; then
+    printf '/\n'
+  else
+    local IFS=/
+    printf '/%s\n' "${output_parts[*]}"
+  fi
+}
+
+audit_log_value() {
+  case "$1" in
+    *$'\n'*|*$'\r'*|*$'\t'*)
+      printf 'base64:%s' "$(printf '%s' "$1" | base64 | tr -d '\n')"
+      ;;
+    *)
+      printf '%q' "$1"
+      ;;
+  esac
+}
+
+emit_symlink_audit_for_root() {
+  local actual_root=$1 display_root=$2 actual_norm link target rel display_path target_norm symlinks=0 systemd_wants=0 warnings=0 is_systemd_wants=0 find_output find_status=0
+  actual_norm="$(normalize_path "$actual_root")"
+  find_output="$(mktemp -t hermes-backup-symlink-audit.XXXXXX)"
+  find "$actual_root" -type l -print0 >"$find_output" 2>/dev/null || find_status=$?
+  if [[ "$find_status" -ne 0 ]]; then
+    warnings=$((warnings + 1))
+    log "symlink_audit_issue path=$(audit_log_value "$display_root") target=- reason=traversal-failed severity=warning"
+  fi
+  while IFS= read -r -d '' link; do
+    target="$(readlink -- "$link")"
+    rel=${link#"$actual_root"/}
+    display_path="$display_root/$rel"
+    symlinks=$((symlinks + 1))
+    is_systemd_wants=0
+    if is_systemd_wants_symlink "$display_path"; then
+      is_systemd_wants=1
+      systemd_wants=$((systemd_wants + 1))
+    fi
+    if [[ "$target" == /* ]]; then
+      if [[ "$is_systemd_wants" -eq 1 ]] && is_expected_absolute_systemd_user_target "$target"; then
+        log "symlink_audit_systemd_wants path=$(audit_log_value "$display_path") target=$(audit_log_value "$target") status=expected"
+        continue
+      fi
+      warnings=$((warnings + 1))
+      log "symlink_audit_issue path=$(audit_log_value "$display_path") target=$(audit_log_value "$target") reason=absolute-target severity=warning"
+      continue
+    fi
+    target_norm="$(lexical_normalize_absolute_path "$(dirname -- "$link")/$target")"
+    if ! is_same_or_descendant "$target_norm" "$actual_norm"; then
+      warnings=$((warnings + 1))
+      log "symlink_audit_issue path=$(audit_log_value "$display_path") target=$(audit_log_value "$target") reason=parent-escape severity=warning"
+      continue
+    fi
+    if [[ "$is_systemd_wants" -eq 1 ]]; then
+      log "symlink_audit_systemd_wants path=$(audit_log_value "$display_path") target=$(audit_log_value "$target") status=expected"
+    else
+      log "symlink_audit_link path=$(audit_log_value "$display_path") target=$(audit_log_value "$target") status=ok"
+    fi
+  done <"$find_output"
+  rm -f -- "$find_output"
+  log "symlink_audit path=$(audit_log_value "$display_root") symlinks=$symlinks systemd_wants=$systemd_wants warnings=$warnings"
+  SYMLINK_AUDIT_ROOT_SYMLINKS=$symlinks
+  SYMLINK_AUDIT_ROOT_SYSTEMD_WANTS=$systemd_wants
+  SYMLINK_AUDIT_ROOT_WARNINGS=$warnings
+}
+
+emit_restore_symlink_audit() {
+  local include_manifest=$1 live_path rel restored_path total_symlinks=0 total_systemd_wants=0 total_warnings=0
+  while IFS= read -r live_path; do
+    rel="$(relative_without_leading_slash "$live_path")"
+    restored_path="$RESTORE_DIR/$rel"
+    emit_symlink_audit_for_root "$restored_path" "$live_path"
+    total_symlinks=$((total_symlinks + SYMLINK_AUDIT_ROOT_SYMLINKS))
+    total_systemd_wants=$((total_systemd_wants + SYMLINK_AUDIT_ROOT_SYSTEMD_WANTS))
+    total_warnings=$((total_warnings + SYMLINK_AUDIT_ROOT_WARNINGS))
+  done < <(read_manifest_lines "$include_manifest")
+  log "symlink_audit_summary symlinks=$total_symlinks systemd_wants=$total_systemd_wants warnings=$total_warnings"
 }
 
 validate_backup_root_safety() {
@@ -537,6 +647,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 else
   log "mode=confirmed promote=true"
 fi
+emit_restore_symlink_audit "$INCLUDE_MANIFEST"
 
 emit_quiesce_plan "pre-promote"
 if [[ "$DRY_RUN" -eq 0 ]]; then
