@@ -22,10 +22,23 @@
 /home/agent/**/restic-cache/**               # Restic cache directories are rebuildable
 /home/agent/**/dist/**                       # Build outputs are rebuildable
 /home/agent/**/build/**                      # Build outputs are rebuildable
-/home/agent/**/models/**                     # Model downloads are out of scope
-/home/agent/**/model-cache/**                # Model downloads are out of scope
-/home/agent/media/**                         # Media libraries are out of scope
-/home/agent/**/media/**                      # Media libraries are out of scope
+/home/agent/models/**                        # Top-level model downloads are out of scope
+/home/agent/shared/models/**                 # Shared model download roots are out of scope
+/home/agent/shared/**/models/**              # Nested shared model download roots are out of scope
+/home/agent/.hermes/home/models/**           # Default-profile home model downloads are out of scope
+/home/agent/.hermes/profiles/*/home/models/** # Profile home model downloads are out of scope
+/home/agent/**/model-cache/**                # Explicit model cache directories are out of scope
+/home/agent/.ollama/models/**                # Ollama model downloads are out of scope
+/home/agent/.local/share/huggingface/**      # Hugging Face model caches are out of scope
+/home/agent/.hermes/home/.ollama/models/**   # Default-profile home Ollama model downloads are out of scope
+/home/agent/.hermes/profiles/*/home/.ollama/models/** # Profile home Ollama model downloads are out of scope
+/home/agent/.hermes/home/.local/share/huggingface/** # Default-profile Hugging Face model caches are out of scope
+/home/agent/.hermes/profiles/*/home/.local/share/huggingface/** # Profile Hugging Face model caches are out of scope
+/home/agent/media/**                         # Top-level media libraries are out of scope
+/home/agent/shared/media/**                  # Shared media library roots are out of scope
+/home/agent/shared/**/media/**               # Nested shared media library roots are out of scope
+/home/agent/.hermes/home/media/**            # Default-profile home media libraries are out of scope
+/home/agent/.hermes/profiles/*/home/media/** # Profile home media libraries are out of scope
 /var/lib/vz/**                               # Proxmox-level backup automation is out of scope
 /etc/pve/**                                  # Proxmox-level backup automation is out of scope
 /home/agent/**/staging/**                   # Runtime staging directories must not be staged recursively

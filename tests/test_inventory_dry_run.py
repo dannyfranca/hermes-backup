@@ -25,6 +25,10 @@ def make_fixture_root(tmp_path: Path) -> Path:
     root = tmp_path / "fixture-root"
     for path in [
         "/home/agent/.hermes/profiles/execution-coder/config.yaml",
+        "/home/agent/.hermes/profiles/execution-coder/skills/media/SKILL.md",
+        "/home/agent/.hermes/profiles/execution-coder/skills/mlops/models/SKILL.md",
+        "/home/agent/.hermes/skills/media/SKILL.md",
+        "/home/agent/.hermes/skills/mlops/models/SKILL.md",
         "/home/agent/shared/reports/status.html",
         "/home/agent/shared-assets/mermaid/mermaid.min.js",
         "/home/agent/.config/systemd/user/hermes-gateway.service",
@@ -149,6 +153,10 @@ def test_inventory_dry_run_summarizes_representative_omissions_without_failing(t
         "/home/agent/.hermes/home/go/pkg/mod/github.com/example/module/cache.go",
         "/home/agent/.hermes/profiles/execution-coder/home/go/pkg/mod/github.com/example/module/cache.go",
         "/home/agent/.hermes/profiles/execution-coder/home/.local/share/pnpm/store/v3/files/aa/cache",
+        "/home/agent/.hermes/home/models/model.bin",
+        "/home/agent/.hermes/profiles/execution-coder/home/models/model.bin",
+        "/home/agent/.hermes/home/media/video.mp4",
+        "/home/agent/.hermes/profiles/execution-coder/home/media/video.mp4",
         "/home/agent/shared/app/.venv/bin/python",
         "/home/agent/shared/app/__pycache__/module.pyc",
         "/home/agent/shared/app/.cache/download.bin",
@@ -160,8 +168,11 @@ def test_inventory_dry_run_summarizes_representative_omissions_without_failing(t
         "/home/agent/shared/app/build/output.o",
         "/home/agent/shared/logs/run.log",
         "/home/agent/shared/staging/snapshot/file.txt",
+        "/home/agent/models/model.bin",
         "/home/agent/shared/models/model.bin",
+        "/home/agent/shared/app/models/model.bin",
         "/home/agent/shared/media/video.mp4",
+        "/home/agent/shared/app/media/video.mp4",
         "/home/agent/shared/runtime/restic-repo/config",
         "/home/agent/shared/runtime/repo.restic/config",
         "/home/agent/shared/archives/hermes.tar",
@@ -184,12 +195,58 @@ def test_inventory_dry_run_summarizes_representative_omissions_without_failing(t
     assert "omitted pattern=/home/agent/.hermes/profiles/*/home/go/pkg/mod/**" in output
     assert "omitted pattern=/home/agent/.hermes/profiles/*/home/.local/share/pnpm/store/**" in output
     assert "omitted pattern=/home/agent/**/logs/**" in output
+    assert "omitted pattern=/home/agent/shared/models/**" in output
+    assert "omitted pattern=/home/agent/shared/**/models/**" in output
+    assert "omitted pattern=/home/agent/.hermes/home/models/**" in output
+    assert "omitted pattern=/home/agent/.hermes/profiles/*/home/models/**" in output
+    assert "omitted pattern=/home/agent/shared/media/**" in output
+    assert "omitted pattern=/home/agent/shared/**/media/**" in output
     assert "omitted pattern=/home/agent/**/archives/**" in output
     assert "omitted pattern=/home/agent/**/*.log" in output
     assert "omitted-example pattern=/home/agent/**/node_modules/** path=/home/agent/shared/app/node_modules" in output
     assert "omitted-example pattern=/home/agent/.hermes/home/go/pkg/mod/** path=/home/agent/.hermes/home/go/pkg/mod" in output
     assert "summary include_roots_present=5 missing_roots=0 invalid_roots=0" in output
     assert re.search(r"omitted=\d+", output)
+    assert_no_dummy_secrets(output)
+
+
+def test_inventory_dry_run_keeps_hermes_skill_media_and_models_in_scope(tmp_path):
+    root = make_fixture_root(tmp_path)
+    write(root, "/home/agent/.hermes/profiles/task-reviewer/skills/media/SKILL.md")
+    write(root, "/home/agent/.hermes/profiles/task-reviewer/skills/mlops/models/SKILL.md")
+    write(root, "/home/agent/shared/models/download.bin")
+    write(root, "/home/agent/shared/app/models/download.bin")
+    write(root, "/home/agent/.hermes/home/models/download.bin")
+    write(root, "/home/agent/.hermes/profiles/execution-coder/home/models/download.bin")
+    write(root, "/home/agent/shared/media/video.mp4")
+    write(root, "/home/agent/shared/app/media/video.mp4")
+    write(root, "/home/agent/.hermes/home/media/video.mp4")
+    write(root, "/home/agent/.hermes/profiles/execution-coder/home/media/video.mp4")
+
+    result = run_inventory(root, "--max-examples", "10")
+    output = combined(result)
+
+    assert result.returncode == 0, output
+    assert "/home/agent/.hermes/profiles/execution-coder/skills/media" not in output
+    assert "/home/agent/.hermes/profiles/execution-coder/skills/mlops/models" not in output
+    assert "/home/agent/.hermes/profiles/task-reviewer/skills/media" not in output
+    assert "/home/agent/.hermes/profiles/task-reviewer/skills/mlops/models" not in output
+    assert "/home/agent/.hermes/skills/media" not in output
+    assert "/home/agent/.hermes/skills/mlops/models" not in output
+    assert "omitted pattern=/home/agent/shared/models/**" in output
+    assert "omitted pattern=/home/agent/shared/**/models/**" in output
+    assert "omitted pattern=/home/agent/shared/media/**" in output
+    assert "omitted pattern=/home/agent/shared/**/media/**" in output
+    assert "omitted pattern=/home/agent/.hermes/home/media/**" in output
+    assert "omitted pattern=/home/agent/.hermes/profiles/*/home/media/**" in output
+    assert "omitted-example pattern=/home/agent/shared/models/** path=/home/agent/shared/models" in output
+    assert "omitted-example pattern=/home/agent/shared/**/models/** path=/home/agent/shared/app/models" in output
+    assert "omitted-example pattern=/home/agent/.hermes/home/models/** path=/home/agent/.hermes/home/models" in output
+    assert "omitted-example pattern=/home/agent/.hermes/profiles/*/home/models/** path=/home/agent/.hermes/profiles/execution-coder/home/models" in output
+    assert "omitted-example pattern=/home/agent/shared/media/** path=/home/agent/shared/media" in output
+    assert "omitted-example pattern=/home/agent/shared/**/media/** path=/home/agent/shared/app/media" in output
+    assert "omitted-example pattern=/home/agent/.hermes/home/media/** path=/home/agent/.hermes/home/media" in output
+    assert "omitted-example pattern=/home/agent/.hermes/profiles/*/home/media/** path=/home/agent/.hermes/profiles/execution-coder/home/media" in output
     assert_no_dummy_secrets(output)
 
 
@@ -258,6 +315,26 @@ def test_inventory_omissions_align_with_stage_final_payload_absence(tmp_path):
             "/home/agent/**/logs/**",
             "/home/agent/shared/logs",
             "home/agent/shared/logs/run.log",
+        ),
+        (
+            "/home/agent/shared/models/**",
+            "/home/agent/shared/models",
+            "home/agent/shared/models/model.bin",
+        ),
+        (
+            "/home/agent/shared/media/**",
+            "/home/agent/shared/media",
+            "home/agent/shared/media/video.mp4",
+        ),
+        (
+            "/home/agent/shared/**/models/**",
+            "/home/agent/shared/app/models",
+            "home/agent/shared/app/models/model.bin",
+        ),
+        (
+            "/home/agent/shared/**/media/**",
+            "/home/agent/shared/app/media",
+            "home/agent/shared/app/media/video.mp4",
         ),
         (
             "/home/agent/**/archives/**",
