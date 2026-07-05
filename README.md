@@ -128,8 +128,8 @@ The shortest safe recovery path is:
 3. Enter B2/restic/Telegram values only into local prompts from Danny's password manager.
 4. Run `scripts/activate.sh --telegram-test --first-check` to prove alert delivery and repository health before restore without taking a replacement-VM backup over the snapshot selection path.
 5. Run `scripts/restore.sh` and inspect the safe restore directory.
-6. Dry-run `scripts/promote.sh --dry-run <restore-dir>`.
-7. Run `scripts/promote.sh --yes --confirm PROMOTE-HERMES-RESTORE <restore-dir>` only after the restore has been verified.
+6. Dry-run `scripts/promote.sh --dry-run <restore-dir>` and review both the promote plan and `quiesce ...` lines.
+7. Run `scripts/promote.sh --yes --confirm PROMOTE-HERMES-RESTORE <restore-dir>` only after the restore has been verified and Hermes activity is quiesced or explicitly acknowledged.
 8. Run `scripts/activate.sh --first-backup --first-check --enable-timers` after restore/promote verification, or after credential rotation if compromise is suspected. Start timer units manually only if current-session scheduling is desired and systemd catch-up behavior is acceptable, then verify user systemd timers, key restored paths, SQLite integrity, local logs, and raw Telegram drill reporting.
 
 ## Safe restore command
@@ -159,7 +159,7 @@ scripts/promote.sh --dry-run ~/restore/hermes-vm-backup/latest
 scripts/promote.sh --yes --confirm PROMOTE-HERMES-RESTORE ~/restore/hermes-vm-backup/latest
 ```
 
-`promote.sh` is intentionally separate from `restore.sh`; install, restore, timers, and future drill paths must not call it automatically. The command requires an absolute restore directory with the non-secret `.hermes-backup-restore.json` marker written by `restore.sh`, requires the expected restored include roots, refuses restore paths that overlap configured live include paths, and refuses symlinked restore/live path components. Dry-run mode prints the planned backup/promote actions without changing live paths. Confirmed mode optionally stops active known user services with `systemctl --user`, creates a unique local pre-promotion backup under `~/.local/state/hermes-backup/pre-promotion-backups/<timestamp>.<suffix>/`, replaces the configured live include roots from the inspected restore output, reloads user systemd state, and prints a checklist for Hermes profiles, shared outputs, shared-assets, systemd user units, and Quadlets. It prints paths/status only; it never prints B2 keys, restic passwords, Telegram credentials, file contents, or backup archives.
+`promote.sh` is intentionally separate from `restore.sh`; install, restore, timers, and future drill paths must not call it automatically. The command requires an absolute restore directory with the non-secret `.hermes-backup-restore.json` marker written by `restore.sh`, requires the expected restored include roots, refuses restore paths that overlap configured live include paths, and refuses symlinked restore/live path components. Dry-run mode prints the planned backup/promote actions plus a non-mutating Hermes quiesce plan. Confirmed mode may stop only the reviewed user-service allowlist (`hermes-gateway.service` and `hermes-dashboard.service`), requires manual review or `--quiesce-ack PROMOTE-HERMES-QUIESCE` for other active Hermes-like services/processes or unavailable probes, creates a unique local pre-promotion backup under `~/.local/state/hermes-backup/pre-promotion-backups/<timestamp>.<suffix>/`, replaces the configured live include roots from the inspected restore output, reloads user systemd state, and prints a checklist for Hermes profiles, shared outputs, shared-assets, systemd user units, and Quadlets. It prints paths/status only; it never prints B2 keys, restic passwords, Telegram credentials, file contents, or backup archives.
 
 Collocation baseline:
 

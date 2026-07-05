@@ -45,19 +45,20 @@ Use this when the VM is broken and you need the shortest safe path.
    ```
 
 9. Inspect the restore output and run the verification checklist below. Do not promote until the safe restore looks right.
-10. Dry-run the live promote plan:
+10. Dry-run the live promote and quiesce plan:
 
     ```bash
     scripts/promote.sh --dry-run "$HOME/restore/hermes-vm-backup/latest"
     ```
 
-11. If the dry-run is correct, run the explicit promote command:
+11. Read the `quiesce ...` lines. If any non-reviewed Hermes service/process is active or a probe is unavailable, stop/account for it manually or proceed only with the explicit quiesce acknowledgement described in Section 6.
+12. If the dry-run and quiesce plan are correct, run the explicit promote command:
 
     ```bash
     scripts/promote.sh --yes --confirm PROMOTE-HERMES-RESTORE "$HOME/restore/hermes-vm-backup/latest"
     ```
 
-12. Enable the approved backup/check/restore-drill user timers after restore/promote verification, or after Section 10 credential rotation if compromise is suspected. The activation gate requires a successful first backup/check in the same run before timer enablement and creates enabled symlinks without `--now`; start the timer units manually only if current-session scheduling is desired and systemd catch-up behavior is acceptable:
+13. Enable the approved backup/check/restore-drill user timers after restore/promote verification, or after Section 10 credential rotation if compromise is suspected. The activation gate requires a successful first backup/check in the same run before timer enablement and creates enabled symlinks without `--now`; start the timer units manually only if current-session scheduling is desired and systemd catch-up behavior is acceptable:
 
     ```bash
     scripts/activate.sh --first-backup --first-check --enable-timers
@@ -230,24 +231,34 @@ test ! -e "$RESTORE_DIR/home/agent/.cache"
 
 ## 6. Explicit live promote workflow
 
-Promote only after the safe restore has been inspected.
+Promote only after the safe restore has been inspected and Hermes activity is quiesced.
 
-1. Dry-run the promote plan:
+1. Dry-run the promote and quiesce plan:
 
    ```bash
    scripts/promote.sh --dry-run "$RESTORE_DIR"
    ```
 
-2. Read the planned live replacements and pre-promotion backup path. If the plan is surprising, stop.
-3. Run the explicit confirmed command:
+2. Read the planned live replacements, pre-promotion backup path, and `quiesce ...` lines. The dry-run is non-mutating: it must not stop services, copy files, or create the pre-promotion backup directory.
+3. Stop or account for active Hermes activity before the confirmed promote:
+   - `hermes-gateway.service` and `hermes-dashboard.service` are the reviewed service allowlist that `promote.sh` may stop automatically in confirmed mode.
+   - Any other active `hermes*.service`, Hermes gateway/dashboard/Kanban process, or unavailable service/process probe requires operator review. Stop it manually when appropriate.
+   - Do not broadly `kill`, `pkill`, or stop unrelated user processes just because they contain nearby project paths.
+4. Run the explicit confirmed command only when the plan is expected:
 
    ```bash
    scripts/promote.sh --yes --confirm PROMOTE-HERMES-RESTORE "$RESTORE_DIR"
    ```
 
-4. Keep the printed pre-promotion backup path. It is the rollback point for the previous live state.
+   If the script still reports active or unverified Hermes services/processes after reviewed services are stopped, either stop them manually and rerun, or proceed only after explicitly acknowledging the quiesce risk:
 
-Promote may stop active known user services, replace configured live include roots, reload user systemd state, and print a post-promote checklist. It must not run from install, restore, timers, backup, check, or drill paths.
+   ```bash
+   scripts/promote.sh --yes --confirm PROMOTE-HERMES-RESTORE --quiesce-ack PROMOTE-HERMES-QUIESCE "$RESTORE_DIR"
+   ```
+
+5. Keep the printed pre-promotion backup path. It is the rollback point for the previous live state.
+
+Promote may stop only the reviewed service allowlist, replace configured live include roots, reload user systemd state, and print a post-promote checklist. It must not run from install, restore, timers, backup, check, or drill paths.
 
 ## 7. Post-promote verification checklist
 
