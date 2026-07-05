@@ -1,0 +1,14 @@
+# Source template rendered by install.sh into the user's systemd unit dir.
+# Secrets stay in the local config file; this unit passes only its path to the script.
+# The drill command restores only to a temporary safe directory and never promotes live state.
+
+[Unit]
+Description=Hermes VM monthly safe restore drill
+Documentation=https://github.com/dannyfranca/hermes-backup
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=EXAMPLE_REPO_PATH
+ExecStart=EXAMPLE_REPO_PATH/scripts/restore-drill.sh --config-env EXAMPLE_LOCAL_CONFIG_DIR/hermes-backup.env

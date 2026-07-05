@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bootstrap/install path for local config plus user systemd backup/check timers.
+# Bootstrap/install path for local config plus user systemd backup/check/restore-drill timers.
 # Secrets remain in local chmod-600 config files; rendered unit files contain paths only.
 { set +x; } 2>/dev/null || true
 set -euo pipefail
@@ -154,7 +154,7 @@ verify_unit_file() {
   for secret_assignment in B2_ACCOUNT_ID= B2_ACCOUNT_KEY= RESTIC_REPOSITORY= RESTIC_PASSWORD= RESTIC_PASSWORD_FILE= TELEGRAM_BOT_TOKEN= TELEGRAM_CHAT_ID=; do
     [[ "$text" != *"$secret_assignment"* ]] || fail "unit embeds secret/config assignment $secret_assignment: $path"
   done
-  [[ "$text" != *promote.sh* && "$text" != *restore.sh* ]] || fail "backup/check scheduler must not call restore or promote commands: $path"
+  [[ "$text" != *promote.sh* && "$text" != *restore.sh* ]] || fail "systemd scheduler units must not call restore or promote commands: $path"
 }
 
 validate_systemd_embedded_path() {
@@ -170,6 +170,7 @@ verify_scheduler_ready() {
   local unit
   [[ -x "$SCRIPT_DIR/scripts/backup.sh" ]] || fail "backup command is missing or not executable: $SCRIPT_DIR/scripts/backup.sh"
   [[ -x "$SCRIPT_DIR/scripts/restic-check.sh" ]] || fail "check command is missing or not executable: $SCRIPT_DIR/scripts/restic-check.sh"
+  [[ -x "$SCRIPT_DIR/scripts/restore-drill.sh" ]] || fail "restore drill command is missing or not executable: $SCRIPT_DIR/scripts/restore-drill.sh"
   validate_private_file_if_present "local env file" "$CONFIG_DIR/hermes-backup.env"
   validate_private_file_if_present "local restic password file" "$CONFIG_DIR/restic-password"
   [[ -f "$CONFIG_DIR/hermes-backup.env" && -f "$CONFIG_DIR/restic-password" ]] || fail "local config files must exist before enabling timers"
@@ -211,6 +212,8 @@ EXPECTED_UNITS=(
   hermes-backup-backup.timer
   hermes-backup-check.service
   hermes-backup-check.timer
+  hermes-backup-restore-drill.service
+  hermes-backup-restore-drill.timer
 )
 CONFIG_DIR="$(config_dir_default)"
 SYSTEMD_USER_DIR="$(systemd_user_dir_default)"
@@ -283,15 +286,15 @@ else
   fail "partial local config exists; expected both hermes-backup.env and restic-password or neither"
 fi
 
-log "Step 4/5: rendering backup/check systemd --user units and reloading the user manager."
+log "Step 4/5: rendering backup/check/restore-drill systemd --user units and reloading the user manager."
 for template in "$SCRIPT_DIR"/systemd/user/*; do
   [[ -f "$template" ]] || continue
   case "$(basename -- "$template")" in
-    hermes-backup-backup.service|hermes-backup-backup.timer|hermes-backup-check.service|hermes-backup-check.timer)
+    hermes-backup-backup.service|hermes-backup-backup.timer|hermes-backup-check.service|hermes-backup-check.timer|hermes-backup-restore-drill.service|hermes-backup-restore-drill.timer)
       render_unit_template "$template" "$SYSTEMD_USER_DIR"
       ;;
     *)
-      log "Skipping non-backup/check unit template for this ticket: $(basename -- "$template")"
+      log "Skipping non-backup/check/restore-drill unit template for this ticket: $(basename -- "$template")"
       ;;
   esac
 done
@@ -306,14 +309,14 @@ log "Step 5/5: timer enablement gate."
 if [[ "$ENABLE_TIMERS" == "1" ]]; then
   verify_scheduler_ready
   validate_config_env_contents
-  systemctl --user enable hermes-backup-backup.timer hermes-backup-check.timer
+  systemctl --user enable hermes-backup-backup.timer hermes-backup-check.timer hermes-backup-restore-drill.timer
   if command -v loginctl >/dev/null 2>&1; then
     linger_state="$(loginctl show-user "${USER:-$(id -un)}" -p Linger --value 2>/dev/null || true)"
     if [[ "$linger_state" != "yes" ]]; then
       log "Warning: systemd user lingering is not enabled; timers may not run unattended after boot until an operator runs: loginctl enable-linger ${USER:-$(id -un)}"
     fi
   fi
-  log "Enabled user timers for next user-manager activation: hermes-backup-backup.timer hermes-backup-check.timer"
+  log "Enabled user timers for next user-manager activation: hermes-backup-backup.timer hermes-backup-check.timer hermes-backup-restore-drill.timer"
 else
   log "Rendered units but did not enable timers. To enable through the same verification gate after local verification:"
   log "  $(quote_arg "$SCRIPT_DIR/install.sh") --config-dir $(quote_arg "$CONFIG_DIR") --enable-timers"
@@ -327,6 +330,6 @@ log "Created or verified safe restore dir: $RESTORE_DIR"
 log "Rendered systemd units to: $SYSTEMD_USER_DIR"
 log "Backup cadence: daily around 03:30 with 30m randomized delay."
 log "Check cadence: weekly Sunday around 08:30 with 45m randomized delay."
+log "Restore-drill cadence: first Sunday monthly around 10:30 with 2h randomized delay."
 log "No backup/check/restore/promote/drill command was run by install."
-log "No restic init, B2/Telegram network validation, Hermes cron scheduling, or restore-drill timer enablement was run."
-log "Restore-drill monthly scheduling remains owned by the restore-drill-runbook bundle after its command is reviewed."
+log "No restic init, B2/Telegram network validation, Hermes cron scheduling, or timer starts were run."

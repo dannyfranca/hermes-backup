@@ -19,6 +19,8 @@ UNIT_NAMES = [
     "hermes-backup-backup.timer",
     "hermes-backup-check.service",
     "hermes-backup-check.timer",
+    "hermes-backup-restore-drill.service",
+    "hermes-backup-restore-drill.timer",
 ]
 
 
@@ -36,7 +38,7 @@ def fake_bin(tmp_path: Path, *, systemctl_body=None) -> Path:
 case "$*" in
   "--user list-unit-files"*) exit 0 ;;
   "--user daemon-reload") exit 0 ;;
-  "--user enable hermes-backup-backup.timer hermes-backup-check.timer") exit 0 ;;
+  "--user enable hermes-backup-backup.timer hermes-backup-check.timer hermes-backup-restore-drill.timer") exit 0 ;;
 esac
 exit 42
 """
@@ -210,6 +212,16 @@ def test_install_bootstraps_temp_home_with_rendered_systemd_units(tmp_path):
             "Unit=hermes-backup-check.service",
             "WantedBy=timers.target",
         ],
+        "hermes-backup-restore-drill.service": [
+            f"WorkingDirectory={ROOT}",
+            f"ExecStart={ROOT}/scripts/restore-drill.sh --config-env {config_dir / 'hermes-backup.env'}",
+        ],
+        "hermes-backup-restore-drill.timer": [
+            "OnCalendar=Sun *-*-01..07 10:30:00",
+            "RandomizedDelaySec=2h",
+            "Unit=hermes-backup-restore-drill.service",
+            "WantedBy=timers.target",
+        ],
     }
     for unit_name in UNIT_NAMES:
         unit = unit_dir / unit_name
@@ -220,7 +232,9 @@ def test_install_bootstraps_temp_home_with_rendered_systemd_units(tmp_path):
         for needle in expected_unit_text[unit_name]:
             assert needle in text
         assert "promote.sh" not in text
-        assert "restore.sh" not in text
+        if unit_name != "hermes-backup-restore-drill.service":
+            assert "restore.sh" not in text
+        assert "promote.sh" not in text
         if unit_name.endswith(".service"):
             assert text.count("\nExecStart=") == 1
             assert "\nExecStartPre=" not in text
@@ -289,11 +303,13 @@ printf '%s\n' "$*" >> {calls}
 case "$*" in
   "--user list-unit-files"*) exit 0 ;;
   "--user daemon-reload") exit 0 ;;
-  "--user enable hermes-backup-backup.timer hermes-backup-check.timer")
+  "--user enable hermes-backup-backup.timer hermes-backup-check.timer hermes-backup-restore-drill.timer")
     grep -F "ExecStart={ROOT}/scripts/backup.sh --config-env {expected_home}/.config/hermes-backup/hermes-backup.env" {expected_home}/.config/systemd/user/hermes-backup-backup.service >/dev/null || exit 44
     grep -F "ExecStart={ROOT}/scripts/restic-check.sh --config-env {expected_home}/.config/hermes-backup/hermes-backup.env" {expected_home}/.config/systemd/user/hermes-backup-check.service >/dev/null || exit 45
     grep -F "OnCalendar=*-*-* 03:30:00" {expected_home}/.config/systemd/user/hermes-backup-backup.timer >/dev/null || exit 46
     grep -F "OnCalendar=Sun *-*-* 08:30:00" {expected_home}/.config/systemd/user/hermes-backup-check.timer >/dev/null || exit 47
+    grep -F "ExecStart={ROOT}/scripts/restore-drill.sh --config-env {expected_home}/.config/hermes-backup/hermes-backup.env" {expected_home}/.config/systemd/user/hermes-backup-restore-drill.service >/dev/null || exit 48
+    grep -F "OnCalendar=Sun *-*-01..07 10:30:00" {expected_home}/.config/systemd/user/hermes-backup-restore-drill.timer >/dev/null || exit 49
     exit 0 ;;
 esac
 exit 42
@@ -303,11 +319,11 @@ exit 42
     calls_lines = calls.read_text().splitlines()
     assert calls_lines[-2:] == [
         "--user daemon-reload",
-        "--user enable hermes-backup-backup.timer hermes-backup-check.timer",
+        "--user enable hermes-backup-backup.timer hermes-backup-check.timer hermes-backup-restore-drill.timer",
     ]
     unit_dir = home / ".config" / "systemd" / "user"
     assert all((unit_dir / unit).is_file() for unit in UNIT_NAMES)
-    assert "Enabled user timers for next user-manager activation: hermes-backup-backup.timer hermes-backup-check.timer" in combined(result)
+    assert "Enabled user timers for next user-manager activation: hermes-backup-backup.timer hermes-backup-check.timer hermes-backup-restore-drill.timer" in combined(result)
     assert_no_dummy_secrets(combined(result))
 
 
