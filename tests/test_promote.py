@@ -443,6 +443,91 @@ def test_refuses_file_restored_include_root(tmp_path):
     assert not backup.exists(); no_secrets(output)
 
 
+def test_promote_dry_run_audits_symlinks_without_banning_systemd_wants(tmp_path):
+    live, restore, backup, man = fixture(tmp_path, ["/home/agent/.hermes", "/home/agent/.config/systemd/user"])
+    hermes = restore / "home/agent/.hermes"
+    (hermes / "safe-target").mkdir()
+    (hermes / "safe-link").symlink_to("safe-target", target_is_directory=True)
+    (hermes / "absolute-link").symlink_to("/tmp/surprising-absolute-target")
+    (hermes / "nested").symlink_to("/tmp/nested-outside")
+    (hermes / "through-symlink").symlink_to("nested/file")
+    (hermes / "profiles").mkdir()
+    (hermes / "profiles/escape-link").symlink_to("../../../outside-restore")
+    systemd_user = restore / "home/agent/.config/systemd/user"
+    (systemd_user / "hermes-gateway.service").write_text("[Service]\n")
+    wants = systemd_user / "default.target.wants"
+    wants.mkdir()
+    (wants / "hermes-gateway.service").symlink_to("../hermes-gateway.service")
+    (wants / "hermes-dashboard.service").symlink_to("/home/agent/.config/systemd/user/hermes-dashboard.service")
+    (wants / "bad-absolute.service").symlink_to("/tmp/bad-systemd.service")
+    (wants / "bad-escape.service").symlink_to("../../../../bad-systemd.service")
+
+    bin_dir, _, probe_env = fake_systemctl(tmp_path, active_units=[])
+    env = {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH','')}", **probe_env}
+    result = run(*args(live, backup, man, restore, "--dry-run"), env=env)
+    output = combined(result)
+
+    assert result.returncode == 0, output
+    assert "symlink_audit_summary symlinks=9 systemd_wants=4 warnings=5" in output
+    assert "symlink_audit path=/home/agent/.hermes symlinks=5 systemd_wants=0 warnings=3" in output
+    assert "symlink_audit path=/home/agent/.config/systemd/user symlinks=4 systemd_wants=4 warnings=2" in output
+    assert "symlink_audit_systemd_wants path=/home/agent/.config/systemd/user/default.target.wants/hermes-gateway.service target=../hermes-gateway.service status=expected" in output
+    assert "symlink_audit_systemd_wants path=/home/agent/.config/systemd/user/default.target.wants/hermes-dashboard.service target=/home/agent/.config/systemd/user/hermes-dashboard.service status=expected" in output
+    assert "symlink_audit_link path=/home/agent/.hermes/safe-link target=safe-target status=ok" in output
+    assert "symlink_audit_link path=/home/agent/.hermes/through-symlink target=nested/file status=ok" in output
+    assert "symlink_audit_issue path=/home/agent/.config/systemd/user/default.target.wants/bad-absolute.service target=/tmp/bad-systemd.service reason=absolute-target" in output
+    assert "symlink_audit_issue path=/home/agent/.config/systemd/user/default.target.wants/bad-escape.service target=../../../../bad-systemd.service reason=parent-escape" in output
+    assert "symlink_audit_issue path=/home/agent/.hermes/absolute-link target=/tmp/surprising-absolute-target reason=absolute-target" in output
+    assert "symlink_audit_issue path=/home/agent/.hermes/nested target=/tmp/nested-outside reason=absolute-target" in output
+    assert "symlink_audit_issue path=/home/agent/.hermes/through-symlink" not in output
+    assert "symlink_audit_issue path=/home/agent/.hermes/profiles/escape-link target=../../../outside-restore reason=parent-escape" in output
+    assert not backup.exists(); no_secrets(output)
+
+
+def test_confirmed_promote_preserves_restored_symlinks_without_dereferencing(tmp_path):
+    live, restore, backup, man = fixture(tmp_path, ["/home/agent/.hermes"])
+    restored_hermes = restore / "home/agent/.hermes"
+    (restored_hermes / "link-target").write_text("linked fixture\n")
+    (restored_hermes / "relative-link").symlink_to("link-target")
+    bin_dir, _, systemctl_env = fake_systemctl(tmp_path, active_units=[])
+    env = {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH','')}", **systemctl_env}
+
+    result = run(*args(live, backup, man, restore, "--yes", "--confirm", "PROMOTE-HERMES-RESTORE"), env=env)
+    output = combined(result)
+
+    assert result.returncode == 0, output
+    promoted_link = live / "home/agent/.hermes/relative-link"
+    assert promoted_link.is_symlink()
+    assert os.readlink(promoted_link) == "link-target"
+    assert "symlink_audit_summary symlinks=1 systemd_wants=0 warnings=0" in output
+    no_secrets(output)
+
+
+def test_symlink_audit_quotes_restored_link_values_and_warns_on_traversal_errors(tmp_path):
+    live, restore, backup, man = fixture(tmp_path, ["/home/agent/.hermes"])
+    hermes = restore / "home/agent/.hermes"
+    (hermes / "safe-target").write_text("ok\n")
+    (hermes / "line\nspoof").symlink_to("safe-target\nsymlink_audit_summary symlinks=0 systemd_wants=0 warnings=0")
+    restricted = hermes / "restricted"
+    restricted.mkdir()
+    (restricted / "hidden-link").symlink_to("/tmp/hidden")
+    restricted.chmod(0)
+    bin_dir, _, probe_env = fake_systemctl(tmp_path, active_units=[])
+    env = {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH','')}", **probe_env}
+
+    try:
+        result = run(*args(live, backup, man, restore, "--dry-run"), env=env)
+    finally:
+        restricted.chmod(0o700)
+    output = combined(result)
+
+    assert result.returncode == 0, output
+    assert "symlink_audit_issue path=/home/agent/.hermes target=- reason=traversal-failed severity=warning" in output
+    assert output.count("symlink_audit_summary") == 1
+    assert "symlink_audit_summary symlinks=0 systemd_wants=0 warnings=0" not in output
+    no_secrets(output)
+
+
 def test_refuses_restore_dir_argument_symlink_and_symlinked_restore_ancestor(tmp_path):
     live, restore, backup, man = fixture(tmp_path, ["/home/agent/.hermes"])
     link = tmp_path / "restore-link"; link.symlink_to(restore, target_is_directory=True)
