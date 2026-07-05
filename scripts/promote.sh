@@ -7,7 +7,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/promote.sh [--manifest-dir PATH] [--live-root PATH] [--backup-root PATH] [--dry-run] [--yes --confirm PROMOTE-HERMES-RESTORE] RESTORE_DIR
+Usage: scripts/promote.sh [--manifest-dir PATH] [--live-root PATH] [--backup-root PATH] [--dry-run] [--quiesce-ack PROMOTE-HERMES-QUIESCE] [--yes --confirm PROMOTE-HERMES-RESTORE] RESTORE_DIR
 
 Promotes an already-inspected safe restore directory into the live Hermes paths.
 This is the dangerous, explicit live replacement step; restore.sh never calls it.
@@ -16,7 +16,9 @@ Required guardrails:
   * RESTORE_DIR must be an absolute path and must contain restored include roots.
   * RESTORE_DIR must not overlap live include paths.
   * Mutating mode requires both --yes and --confirm PROMOTE-HERMES-RESTORE.
-  * --dry-run prints the planned backup/promote actions without changing live paths.
+  * --dry-run prints the planned backup/promote and quiesce actions without changing live paths.
+  * Confirmed promote stops only reviewed Hermes user-service units.
+  * If other active Hermes services/processes are detected, pass --quiesce-ack PROMOTE-HERMES-QUIESCE only after manually quiescing or accepting the risk.
   * A local pre-promotion backup is created before any live path is replaced.
 
 Defaults:
@@ -32,6 +34,15 @@ USAGE
 log() { printf '%s\n' "$*"; }
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
 RESTORE_MARKER_NAME=".hermes-backup-restore.json"
+# Reviewed, explicit allowlist: confirmed promote may stop only these user services.
+# Other Hermes-like services/processes are detected and surfaced for operator review,
+# but are never killed/stopped automatically by this script.
+REVIEWED_STOP_UNITS=(
+  "hermes-gateway.service"
+  "hermes-dashboard.service"
+)
+HERMES_SERVICE_GLOBS=("hermes*.service")
+
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
@@ -41,6 +52,7 @@ BACKUP_ROOT=""
 DRY_RUN=0
 YES=0
 CONFIRM=""
+QUIESCE_ACK=""
 RESTORE_DIR=""
 
 backup_root_default() {
@@ -173,17 +185,146 @@ systemd_user_available() {
   systemctl --user list-units >/dev/null 2>&1
 }
 
-maybe_stop_user_services() {
-  systemd_user_available || { log "systemd_user=unavailable action=skip"; return 0; }
+unit_is_reviewed_stop_unit() {
+  local candidate=$1 unit
+  for unit in "${REVIEWED_STOP_UNITS[@]}"; do
+    [[ "$candidate" == "$unit" ]] && return 0
+  done
+  return 1
+}
+
+reviewed_process_class_for_unit() {
+  case "$1" in
+    hermes-gateway.service) printf '%s\n' "hermes-gateway" ;;
+    hermes-dashboard.service) printf '%s\n' "hermes-dashboard" ;;
+    *) return 1 ;;
+  esac
+}
+
+quiesce_process_class() {
+  local comm=$1 args=$2 text word base
+  text="$comm $args"
+  case "$text" in
+    *hermes-gateway*|*"hermes gateway"*) printf '%s\n' "hermes-gateway" ;;
+    *hermes-dashboard*|*"hermes dashboard"*) printf '%s\n' "hermes-dashboard" ;;
+    *hermes-github-pr-kanban-bridge*|*github_pr_kanban_bridge.py*) printf '%s\n' "hermes-pr-kanban-bridge" ;;
+    *"hermes kanban"*) printf '%s\n' "hermes-kanban" ;;
+    *)
+      for word in $comm $args; do
+        base=${word##*/}
+        case "$base" in
+          hermes|hermes-[!-]*) printf '%s\n' "$base"; return 0 ;;
+        esac
+      done
+      return 1 ;;
+  esac
+}
+
+collect_hermes_processes() {
+  command -v ps >/dev/null 2>&1 || return 2
+  local pid comm args class ps_output
+  ps_output="$(ps -eo pid=,comm=,args= 2>/dev/null)" || return $?
+  while read -r pid comm args; do
+    [[ -n "${pid:-}" && "$pid" != "$$" && "$pid" != "${BASHPID:-}" ]] || continue
+    class="$(quiesce_process_class "${comm:-}" "${args:-}" 2>/dev/null || true)"
+    [[ -n "$class" ]] || continue
+    printf '%s\t%s\t%s\n' "$pid" "${comm:-unknown}" "$class"
+  done <<< "$ps_output"
+}
+
+emit_quiesce_plan() {
+  local phase=${1:-pre-promote} unit glob line pid comm class active_count=0 reviewed_active=0 unreviewed_active=0 process_active=0 probe_blockers=0 process_lines process_status=0 service_lines service_status=0 reviewed_process_classes="" unit_class
+  log "quiesce_plan=begin phase=$phase reviewed_stop_units=${REVIEWED_STOP_UNITS[*]}"
+  if systemd_user_available; then
+    for unit in "${REVIEWED_STOP_UNITS[@]}"; do
+      if systemctl --user is-active --quiet "$unit" >/dev/null 2>&1; then
+        log "quiesce service=$unit status=active action=stop-reviewed-before-promote"
+        unit_class="$(reviewed_process_class_for_unit "$unit" 2>/dev/null || true)"
+        [[ -z "$unit_class" ]] || reviewed_process_classes="${reviewed_process_classes} ${unit_class}"
+        active_count=$((active_count + 1)); reviewed_active=$((reviewed_active + 1))
+      else
+        log "quiesce service=$unit status=inactive action=none"
+      fi
+    done
+    for glob in "${HERMES_SERVICE_GLOBS[@]}"; do
+      service_status=0
+      service_lines="$(systemctl --user list-units --type=service --state=active --all --no-legend --plain "$glob" 2>/dev/null)" || service_status=$?
+      if [[ "$service_status" -ne 0 ]]; then
+        log "quiesce service_probe=systemd_user_list_units pattern=$glob status=failed action=manual-check-or-ack"
+        probe_blockers=$((probe_blockers + 1))
+        continue
+      fi
+      while IFS= read -r line; do
+        unit=${line%% *}
+        [[ -n "$unit" ]] || continue
+        unit_is_reviewed_stop_unit "$unit" && continue
+        log "quiesce service=$unit status=active action=manual-stop-or-ack"
+        active_count=$((active_count + 1)); unreviewed_active=$((unreviewed_active + 1))
+      done <<< "$service_lines"
+    done
+  else
+    log "quiesce service_probe=systemd_user status=unavailable action=manual-check-or-ack"
+    probe_blockers=$((probe_blockers + 1))
+  fi
+
+  if command -v ps >/dev/null 2>&1; then
+    process_lines="$(collect_hermes_processes)" || process_status=$?
+    if [[ "$process_status" -ne 0 ]]; then
+      log "quiesce process_probe=ps status=failed action=manual-check-or-ack"
+      probe_blockers=$((probe_blockers + 1))
+    else
+      while IFS=$'\t' read -r pid comm class; do
+        [[ -n "$pid" ]] || continue
+        if [[ " $reviewed_process_classes " == *" $class "* ]]; then
+          log "quiesce process_class=$class pid=$pid command=$comm status=active action=covered-by-reviewed-service-stop"
+          continue
+        fi
+        log "quiesce process_class=$class pid=$pid command=$comm status=active action=manual-stop-or-ack"
+        active_count=$((active_count + 1)); process_active=$((process_active + 1))
+      done <<< "$process_lines"
+    fi
+  else
+    log "quiesce process_probe=ps status=unavailable action=manual-check-or-ack"
+    probe_blockers=$((probe_blockers + 1))
+  fi
+  log "quiesce_plan=end phase=$phase active_items=$active_count reviewed_service_active=$reviewed_active unreviewed_service_active=$unreviewed_active process_active=$process_active probe_blockers=$probe_blockers"
+  QUIESCE_REVIEWED_ACTIVE=$reviewed_active
+  QUIESCE_NONREVIEWED_BLOCKERS=$((unreviewed_active + process_active + probe_blockers))
+  QUIESCE_REMAINING_BLOCKERS=$((reviewed_active + QUIESCE_NONREVIEWED_BLOCKERS))
+}
+
+stop_reviewed_user_services() {
+  systemd_user_available || return 0
   local unit stopped=0
-  for unit in hermes-gateway.service hermes-dashboard.service; do
+  for unit in "${REVIEWED_STOP_UNITS[@]}"; do
     if systemctl --user is-active --quiet "$unit" >/dev/null 2>&1; then
-      log "systemd_user=stop unit=$unit"
+      log "systemd_user=stop unit=$unit reason=reviewed-quiesce-allowlist"
       systemctl --user stop "$unit"
       stopped=$((stopped + 1))
     fi
   done
   log "systemd_user=stop_checked stopped=$stopped"
+}
+
+require_nonreviewed_clear_or_ack() {
+  local blockers=${QUIESCE_NONREVIEWED_BLOCKERS:-0}
+  if [[ "$blockers" -eq 0 ]]; then
+    return 0
+  fi
+  if [[ "$QUIESCE_ACK" == "PROMOTE-HERMES-QUIESCE" ]]; then
+    log "quiesce=acknowledged nonreviewed_blockers=$blockers ack=PROMOTE-HERMES-QUIESCE"
+    return 0
+  fi
+  fail "active or unverified Hermes services/processes remain; rerun --dry-run, quiesce them manually, or pass --quiesce-ack PROMOTE-HERMES-QUIESCE after review"
+}
+
+require_quiesce_clear_after_stop() {
+  local reviewed=${QUIESCE_REVIEWED_ACTIVE:-0}
+  if [[ "$reviewed" -ne 0 ]]; then
+    fail "reviewed Hermes services remain active after stop; inspect systemctl status before promoting"
+  fi
+  require_nonreviewed_clear_or_ack
+  log "quiesce=ok remaining_blockers=0"
 }
 
 maybe_reload_user_systemd() {
@@ -212,6 +353,9 @@ while [[ $# -gt 0 ]]; do
     --confirm)
       [[ $# -ge 2 ]] || fail "--confirm requires PROMOTE-HERMES-RESTORE"
       CONFIRM=$2; shift 2 ;;
+    --quiesce-ack)
+      [[ $# -ge 2 ]] || fail "--quiesce-ack requires PROMOTE-HERMES-QUIESCE"
+      QUIESCE_ACK=$2; shift 2 ;;
     -h|--help)
       usage; exit 0 ;;
     --*) fail "unknown argument: $1" ;;
@@ -240,19 +384,29 @@ stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 if [[ "$DRY_RUN" -eq 1 ]]; then
   PROMOTION_BACKUP_DIR="$BACKUP_ROOT/$stamp.<unique>"
 else
-  mkdir -p -- "$BACKUP_ROOT"
-  chmod 700 "$BACKUP_ROOT" 2>/dev/null || true
-  PROMOTION_BACKUP_DIR="$(mktemp -d "$BACKUP_ROOT/$stamp.XXXXXX")"
-  chmod 700 "$PROMOTION_BACKUP_DIR" 2>/dev/null || true
+  PROMOTION_BACKUP_DIR=""
 fi
 log "Hermes backup explicit live promote"
 log "restore_dir=$RESTORE_DIR"
 log "live_root=$LIVE_ROOT"
-log "pre_promotion_backup=$PROMOTION_BACKUP_DIR"
 if [[ "$DRY_RUN" -eq 1 ]]; then
+  log "pre_promotion_backup=$PROMOTION_BACKUP_DIR"
   log "mode=dry-run promote=false"
 else
   log "mode=confirmed promote=true"
+fi
+
+emit_quiesce_plan "pre-promote"
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  require_nonreviewed_clear_or_ack
+  stop_reviewed_user_services
+  emit_quiesce_plan "post-reviewed-stop"
+  require_quiesce_clear_after_stop
+  mkdir -p -- "$BACKUP_ROOT"
+  chmod 700 "$BACKUP_ROOT" 2>/dev/null || true
+  PROMOTION_BACKUP_DIR="$(mktemp -d "$BACKUP_ROOT/$stamp.XXXXXX")"
+  chmod 700 "$PROMOTION_BACKUP_DIR" 2>/dev/null || true
+  log "pre_promotion_backup=$PROMOTION_BACKUP_DIR"
 fi
 
 while IFS= read -r live_path; do
@@ -275,7 +429,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   exit 0
 fi
 
-maybe_stop_user_services
+# Quiesce was checked and reviewed services were stopped before any live backup or promote mutation.
 
 while IFS= read -r live_path; do
   rel="$(relative_without_leading_slash "$live_path")"
