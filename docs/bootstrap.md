@@ -12,7 +12,7 @@ scripts/check.sh
 
 The harness verifies bootstrap/config safety without live secrets or live backup operations. It runs Bash syntax checks, pytest coverage for missing-tool and successful fixture preflight behavior, local config permission/write behavior, install orchestration, no secret/log leakage, no Hermes cron scheduling, and no user systemd timer enablement side effects. It also fails if a local-secret/runtime-output ignore rule accidentally matches a tracked file.
 
-Future backup/check/restore tickets should extend the nearest owning test file or add a focused sibling test file instead of creating a separate harness.
+Future restore/drill tickets should extend the nearest owning test file or add a focused sibling test file instead of creating a separate harness.
 
 ## One-command install skeleton
 
@@ -27,7 +27,7 @@ The skeleton runs in this order:
 1. `scripts/preflight.sh --check` before any secret prompt.
 2. Local state/log/staging, safe restore, and inert systemd template setup.
 3. `scripts/configure.sh` only after preflight and local path setup pass.
-4. Final inert-scope confirmation; no backup/check/restore/timer action is run.
+4. Final inert-scope confirmation; no backup/check/restore/timer action is run by install.
 
 Default local paths:
 
@@ -150,7 +150,8 @@ Systemd files in `systemd/user/` are source templates only until a downstream in
 
 ## Downstream behavior not implemented here
 
-- No backup/check/restore/promote/drill commands.
+- No live promote/drill commands.
+- `install.sh` does not run backup/check/restore/promote/drill commands.
 - No package installation.
 - No network validation against B2, restic, or Telegram.
 - No timer enablement.
