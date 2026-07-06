@@ -1,12 +1,113 @@
 # hermes-backup
 
-`dannyfranca/hermes-backup` is Danny's opinionated disaster-recovery automation repo for the Hermes Ubuntu VM that runs as user `agent`.
+ADHD-friendly disaster-recovery automation for Danny's Hermes Ubuntu VM.
 
-This repository will version the scripts, config examples, systemd user unit templates, tests, and recovery docs needed to back up and restore Hermes VM state. It must never contain live secrets or backup archives.
+Use this repo to set up encrypted restic backups to Backblaze B2, user systemd backup/check/drill timers, raw Telegram failure/drill alerts, and safe restore/promote workflows.
 
-## Scope
+## Read this first
 
-Included state, from the project PRD:
+- Do not put B2 keys, restic passwords, Telegram tokens, raw backup archives, or restored secret files in Git, chat, issues, PRs, or docs.
+- `./install.sh` is safe/inert: it prompts locally, writes local config, renders units, and reloads user systemd. It does not run backups, restores, checks, drills, restic init, Telegram tests, B2 calls, or timer starts.
+- You are not protected until a first backup, first check, and restore drill have passed.
+- Restore is safe by default: `scripts/restore.sh` writes to an inspection directory. Live replacement requires the separate explicit `scripts/promote.sh --yes --confirm PROMOTE-HERMES-RESTORE ...` command.
+
+## Quick Start: get it running safely
+
+Run from a local shell on the Hermes VM as user `agent`.
+
+### 1. Clone and enter the repo
+
+```bash
+git clone https://github.com/dannyfranca/hermes-backup.git ~/hermes-backup
+cd ~/hermes-backup
+```
+
+### 2. Check local prerequisites
+
+```bash
+scripts/preflight.sh --check
+```
+
+Required local tools:
+
+- `restic`
+- `sqlite3`
+- `rsync`
+- `curl`
+- user-level `systemd` via `systemctl --user`
+
+### 3. Prepare secrets in the password manager
+
+Open Danny's password manager before setup. You need:
+
+- Backblaze B2 key ID and application key for the backup bucket.
+- Restic repository location, such as `b2:bucket-name:path`.
+- Restic repository password.
+- Telegram bot token and chat ID for raw Bot API alerts.
+
+See `docs/password-manager-checklist.md` for the recovery escrow checklist.
+
+### 4. Install local config and user units
+
+```bash
+./install.sh
+```
+
+What this does:
+
+- Runs the offline preflight before any secret prompt.
+- Prompts locally for B2/restic/Telegram values if local config does not exist.
+- Writes local-only files under `~/.config/hermes-backup/` with owner-only permissions.
+- Renders backup/check/restore-drill user systemd units into `~/.config/systemd/user/`.
+- Runs `systemctl --user daemon-reload`.
+- Leaves timers disabled by default.
+
+### 5. Activate only after local config exists
+
+Recommended full first-run path:
+
+```bash
+scripts/activate.sh --init-restic --telegram-test --first-backup --first-check --enable-timers
+systemctl --user list-timers --all 'hermes-backup-*'
+```
+
+This is the first point that may initialize restic, send a Telegram setup test, run a backup, run a repository check, or enable timer symlinks. Timer enablement uses `systemctl --user enable` without `--now`, so it does not immediately dispatch jobs.
+
+For a side-effect preview:
+
+```bash
+scripts/activate.sh --dry-run --init-restic --telegram-test --first-backup --first-check --enable-timers
+```
+
+### 6. Verify before trusting it
+
+```bash
+scripts/check.sh
+scripts/restic-check.sh
+scripts/restore-drill.sh
+systemctl --user status hermes-backup-backup.timer hermes-backup-check.timer hermes-backup-restore-drill.timer
+```
+
+Use `scripts/restore-drill.sh --keep-artifacts` only when you need manual inspection, then delete retained drill output because it can contain restored secrets.
+
+## Common commands
+
+| Need | Command | Safe default |
+| --- | --- | --- |
+| Offline repo/test harness | `scripts/check.sh` | No B2/restic repo/Telegram/timer side effects. |
+| Local runtime prerequisite check | `scripts/preflight.sh --check` | No secret reads or network calls. |
+| Write/reuse local config | `./install.sh` | Prompts locally; timers disabled. |
+| Preview first-run activation | `scripts/activate.sh --dry-run ...` | Prints redacted plan/status only. |
+| First backup/check/timer gate | `scripts/activate.sh --init-restic --telegram-test --first-backup --first-check --enable-timers` | Operator-controlled; enables timers only after first backup/check success. |
+| Manual backup + retention | `scripts/backup.sh` | Uses staging; success quiet in Telegram. |
+| Repository health check | `scripts/restic-check.sh` | Sends one raw Telegram alert only on check failure when configured. |
+| Safe restore for inspection | `scripts/restore.sh` | Restores to `~/restore/hermes-vm-backup/latest-<timestamp>`. |
+| Monthly drill now | `scripts/restore-drill.sh` | Restores to a drill directory, verifies, reports, cleans up by default. |
+| Promote inspected restore | `scripts/promote.sh --dry-run "$RESTORE_DIR"` then confirmed promote | Never automatic; requires explicit confirmation token. |
+
+## What gets backed up
+
+Included live roots:
 
 - `/home/agent/.hermes` — Hermes configuration, profiles, memories, Kanban state, gateway setup, and related local state.
 - `/home/agent/shared` — generated reports and human-facing shared outputs.
@@ -14,202 +115,70 @@ Included state, from the project PRD:
 - `/home/agent/.config/systemd/user` — user service definitions.
 - `/home/agent/.config/containers/systemd` — rootless Podman Quadlet definitions.
 
-Excluded state:
+Excluded/rebuildable state:
 
 - `/home/agent/git`, canonical clones, task worktrees, and other rebuildable repositories.
 - Caches, build outputs, virtual environments, dependency folders, `node_modules`, model downloads, and media libraries.
 - Honcho data/configuration.
 - Proxmox-level backup automation.
 
-## Hard rules for implementation
+The manifest sources are `config/manifests/include.paths` and `config/manifests/exclude.patterns`. See `docs/operations.md#scope-manifests-and-staging` for staging details.
 
-- Use Backblaze B2 through restic with client-side encryption.
-- Keep B2 keys, restic passwords, Telegram bot credentials, and raw backup archives out of Git.
-- Bootstrap must prompt locally for secrets and write only local chmod-600-style config/env files.
-- Use user-level systemd timers for scheduling; do not use Hermes cron for backup/check/drill scheduling.
-- Use raw Telegram Bot API alerts so notifications do not depend on the Hermes gateway.
-- Restore defaults must write to a safe restore directory; live replacement requires an explicit promote step.
+## Scheduling and alerts
+
+- Scheduling uses user systemd timers, not Hermes cron.
+- Alerts and drill reports use the raw Telegram Bot API from local config, not the Hermes gateway.
+- Backup/check/drill jobs share one simple non-blocking runtime lock.
+- Recommended first setup enables timer units through the explicit activation gate after first backup/check verification; `./install.sh --enable-timers` remains a direct enable-only gate for operators who intentionally choose it.
+
+See `docs/operations.md#user-systemd-timers` for timer names, cadence, and lock behavior.
+
+## Recovery pointer
+
+When the VM is broken, start with `docs/recovery-runbook.md`.
+
+Shortest safe recovery shape:
+
+1. Clone this repo on the replacement VM.
+2. Run `scripts/preflight.sh --check` and `./install.sh` locally.
+3. Enter B2/restic/Telegram values only into local prompts from the password manager.
+4. Run `scripts/activate.sh --telegram-test --first-check` before restore.
+5. Run `scripts/restore.sh` and inspect the safe restore directory.
+6. Dry-run `scripts/promote.sh --dry-run "$RESTORE_DIR"`.
+7. Confirm live promote only after inspection and quiesce review.
+8. After restore/promote or credential rotation, run `scripts/activate.sh --first-backup --first-check --enable-timers`.
+
+## Deeper docs
+
+- `docs/bootstrap.md` — install/config/activation contract and local secret handling.
+- `docs/operations.md` — staging, backup, restic check, timers, restore drill, and runtime lock behavior.
+- `docs/recovery-runbook.md` — panic-mode disaster recovery, safe restore, explicit promote, and post-compromise rotation.
+- `docs/password-manager-checklist.md` — recovery secrets Danny must keep outside the VM.
 
 ## Repository structure
 
 ```text
 config/        Placeholder-only config examples and include/exclude manifests.
-docs/          Bootstrap and recovery documentation.
-scripts/       User-facing offline/runtime checks and future VM commands.
+docs/          Bootstrap, operations, recovery, and password-manager docs.
+lib/           Shared shell helpers used by multiple commands.
+scripts/       User-facing offline/runtime commands.
 systemd/user/  Inert source templates for user systemd services/timers.
 tests/         Offline tests for repository contracts and safety checks.
 ```
 
-## Backup scope manifests, dry-run inventory, and SQLite-safe staging
+## Developer verification
 
-The staging scope is versioned under `config/manifests/`:
-
-- `include.paths` is the source of truth for live paths backup staging may consider.
-- `exclude.patterns` is the source of truth for forbidden classes that must never enter staging.
-
-Hermes profile dependency stores such as Go module caches under profile `home/go/pkg/mod` directories and pnpm stores under profile `home/.local/share/pnpm/store` directories are intentionally omitted as rebuildable state. The exclusions are path-specific so durable profile config and local state under `.hermes/profiles/*` still remain eligible for encrypted backup.
-
-Run the offline inventory dry-run before staging/restic work:
-
-```bash
-scripts/inventory-dry-run.sh
-```
-
-The command prints only path/count/status output. It does not print file contents, secrets, B2 keys, restic passwords, Telegram tokens, or backup archives. It exits non-zero if an included tree cannot be inventoried safely, but configured forbidden classes such as Honcho, Git/worktrees, dependency folders, caches/build outputs, explicit model-download/cache roots, media-library roots, Proxmox paths, runtime staging/logs, restic repositories, or raw backup archive files are summarized as staging omissions.
-
-Create a SQLite-safe staging snapshot with `scripts/stage.sh --keep`.
-
-`stage.sh` consumes the same manifests, preserves the live relative path structure under a unique directory in `~/.local/state/hermes-backup/staging/`, and copies non-SQLite payloads with `rsync`. For SQLite candidates, it first snapshot-copies the database main file plus any `-wal`, `-shm`, or `-journal` sidecars into a private temporary directory, retries if the live snapshot state changes mid-copy, then runs `sqlite3 .backup` from that private snapshot and verifies the staged database with `PRAGMA integrity_check`. WAL-mode sources are handled through this snapshot path and log `status=wal-snapshot-backed-up`; clean sources log `status=clean-snapshot-backed-up`. By default, successful transient staging is removed; `--keep` preserves it for a downstream backup command or investigation. The command writes `staging-metadata.json` with manifest paths/checksums, source roots, skipped paths, SQLite snapshot status, and counts, but never file contents or secret values.
-
-Run the restic backup and retention flow after local config is created:
-
-```bash
-scripts/backup.sh
-```
-
-`backup.sh` validates the local chmod-600 env file and restic password file, takes the shared non-blocking runtime lock, runs `stage.sh --keep`, points `restic backup` only at the staging root, tags snapshots with stable `hermes-vm-backup`, and runs `restic forget --tag hermes-vm-backup --group-by host,tags --keep-daily 7 --keep-weekly 8 --keep-monthly 12 --keep-yearly 2 --prune` only after a successful backup. The stable tag/grouping keeps retention meaningful even though staging paths rotate every run. It appends a redacted daily local log under `HERMES_BACKUP_LOG_DIR` (default `~/.local/state/hermes-backup/logs/`), keeps successful runs quiet in Telegram, and sends one compact raw Telegram Bot API alert when staging, backup, prune, or lock acquisition fails and local Telegram config is available. It prints status, the lock file, the staging root, and the snapshot id when available; it does not print B2 keys, restic passwords, Telegram credentials, file contents, or backup archives. It is intentionally limited to backup plus retention/prune/log/alert behavior; timers, promote, and drill behavior remain downstream tickets.
-
-Run a repository health check after local config is created:
-
-```bash
-scripts/restic-check.sh
-```
-
-`restic-check.sh` validates the same local chmod-600 env file and restic password file, takes the shared non-blocking runtime lock, runs `restic check` against the configured repository only when no backup/check/drill job is already running, appends a redacted daily local log under `HERMES_BACKUP_LOG_DIR` (default `~/.local/state/hermes-backup/logs/`), keeps successful checks and lock-contention skips quiet in Telegram, and sends one compact raw Telegram Bot API alert when `restic check` fails and local Telegram config is available. Exit code `0` means the check passed or was cleanly skipped because the shared runtime lock was held, `64` means local config is missing or unsafe, `127` means `restic` is unavailable, and any other non-zero exit is the propagated `restic check` failure. Failure output is redacted for B2 keys, restic password-file paths, repository URLs, Telegram credentials, file contents, backup archives, Authorization-like values, and credential-looking strings. It does not implement restore, promote, or drill behavior.
-
-## First-run activation after local secrets exist
-
-`./install.sh` stays inert by default. After local config exists, run the explicit activation/check path from a local terminal:
-
-```bash
-./install.sh
-scripts/activate.sh --init-restic --telegram-test --first-backup --first-check --enable-timers
-systemctl --user list-timers --all 'hermes-backup-*'
-```
-
-`scripts/activate.sh` first runs the offline preflight and local chmod-600 config/password checks. It verifies the configured restic repository, runs `restic init` only when the repository looks uninitialized and `--init-restic` is passed, sends one raw Telegram Bot API setup-test message only with `--telegram-test`, runs one first backup only with `--first-backup`, runs one repository check only with `--first-check`, and enables the backup/check/restore-drill user timers only after `--first-backup` and `--first-check` succeed in the same activation run. Timer enablement delegates to `./install.sh --enable-timers`, which uses `systemctl --user enable` without `--now`; no timer unit is started unexpectedly.
-
-For a non-network preview, use `scripts/activate.sh --dry-run` with any planned flags. The command prints only paths/status and redacted diagnostics. It must not print B2 keys, restic passwords, Telegram credentials, repository URLs, file contents, or backup archives.
-
-## User systemd backup/check/restore-drill timers
-
-`./install.sh` renders the versioned templates in `systemd/user/` into the user's systemd unit directory, defaulting to `~/.config/systemd/user/`, then runs `systemctl --user daemon-reload`. The rendered services call only the approved repo commands:
-
-- `hermes-backup-backup.service` -> `scripts/backup.sh`
-- `hermes-backup-check.service` -> `scripts/restic-check.sh`
-- `hermes-backup-restore-drill.service` -> `scripts/restore-drill.sh`
-
-The timers are user-level systemd timers, not Hermes cron. Every repository-touching job uses the same non-blocking lock file, defaulting to `$XDG_STATE_HOME/hermes-backup/run.lock` when `XDG_STATE_HOME` is set or `~/.local/state/hermes-backup/run.lock` otherwise, unless local config sets `HERMES_BACKUP_LOCK_FILE` to another absolute local-state path:
-
-- `hermes-backup-backup.timer`: daily at about 03:30 with a 30 minute randomized delay.
-- `hermes-backup-check.timer`: weekly on Sunday at about 08:30 with a 45 minute randomized delay.
-- `hermes-backup-restore-drill.timer`: monthly on the first Sunday at about 10:30 with a 2 hour randomized delay.
-
-Install is idempotent. It reuses an existing local `~/.config/hermes-backup/hermes-backup.env` plus `restic-password` when both are present with `0600` permissions, and it rewrites unit files from templates. By default it does not enable timers; after local verification, enable through the same install-time verification gate with:
-
-```bash
-./install.sh --enable-timers
-systemctl --user list-timers --all 'hermes-backup-*'
-systemctl --user status hermes-backup-backup.timer hermes-backup-check.timer hermes-backup-restore-drill.timer
-```
-
-The gate runs `systemctl --user enable` without `--now` so install does not immediately start persistent timers or dispatch missed backup/check/drill runs. For first setup, prefer the activation sequence above so timer enablement happens only after the first backup and check pass. If Danny wants timers active immediately in the current user manager session, he can start the timer units manually after accepting any systemd catch-up behavior. When `Persistent=true` catch-up or manual starts make jobs collide, the shared lock keeps behavior predictable: backup lock contention is a failure with one raw Telegram alert because a missed backup is actionable, while check and restore-drill contention are clean skips recorded in the local log; restore-drill also sends a `SKIP` drill report so the operator sees the monthly drill did not run. There is no delayed retry, dynamic scheduling, least-busy heuristic, or Hermes cron handoff.
-
-The installer never runs backup, check, restore, promote, drill, restic init, B2/Telegram network validation, or Hermes cron scheduling. The restore-drill timer points only at the already-reviewed safe drill command and never at `restore.sh` or `promote.sh` directly.
-
-## Recovery runbook and disaster checklist
-
-Use `docs/recovery-runbook.md` when rebuilding a fresh VM or validating disaster-recovery readiness. It contains the panic-mode checklist, password-manager prerequisites, safe restore steps, explicit promote procedure, monthly restore-drill interpretation, verification plan, and post-compromise credential-rotation checklist.
-
-The shortest safe recovery path is:
-
-1. Clone `dannyfranca/hermes-backup` onto the replacement VM.
-2. Run `scripts/preflight.sh --check` and `./install.sh` from a local terminal.
-3. Enter B2/restic/Telegram values only into local prompts from Danny's password manager.
-4. Run `scripts/activate.sh --telegram-test --first-check` to prove alert delivery and repository health before restore without taking a replacement-VM backup over the snapshot selection path.
-5. Run `scripts/restore.sh` and inspect the safe restore directory.
-6. Dry-run `scripts/promote.sh --dry-run <restore-dir>` and review both the promote plan and `quiesce ...` lines.
-7. Run `scripts/promote.sh --yes --confirm PROMOTE-HERMES-RESTORE <restore-dir>` only after the restore has been verified and Hermes activity is quiesced or explicitly acknowledged.
-8. Run `scripts/activate.sh --first-backup --first-check --enable-timers` after restore/promote verification, or after credential rotation if compromise is suspected. Start timer units manually only if current-session scheduling is desired and systemd catch-up behavior is acceptable, then verify user systemd timers, key restored paths, SQLite integrity, local logs, and raw Telegram drill reporting.
-
-## Safe restore command
-
-Restore the latest restic snapshot into the default non-live inspection directory:
-
-```bash
-scripts/restore.sh
-```
-
-By default each `latest` restore target is a fresh timestamped directory such as `~/restore/hermes-vm-backup/latest-20260705T143000Z`; this makes repeated restore drills practical without manually deleting the previous inspection tree. If local config sets `HERMES_BACKUP_RESTORE_DIR`, that directory becomes the default restore root; `HERMES_BACKUP_ENV` is honored the same way as `backup.sh`. Pass `--snapshot <snapshot-id>` to restore into `<restore-root>/<snapshot-id>`, or pass `--target <absolute-path>` for a custom inspection directory. `restore.sh` refuses destinations that equal, sit inside, or parent-overlap configured live include paths such as `/home/agent/.hermes`, `/home/agent/shared`, `/home/agent/shared-assets`, `/home/agent/.config/systemd/user`, and `/home/agent/.config/containers/systemd`.
-
-When selecting `latest`, the command filters restic snapshots by both the stable `hermes-vm-backup` tag and a host filter. The host defaults to `HERMES_BACKUP_RESTORE_HOST` from local config when present, otherwise the current machine hostname; prefer the one-off `--host <source-host>` option if the replacement VM hostname differs from the host that created the backup. If `HERMES_BACKUP_RESTORE_HOST` is temporarily set in local config for recovery, remove it before enabling timers or relying on future restore drills so new drills target the replacement VM's own backups.
-
-The command loads the already-created local restic/B2 config, runs `restic restore` for the stable `hermes-vm-backup` tag when selecting `latest`, flattens the staged backup layout into the inspection directory, writes a non-secret `.hermes-backup-restore.json` provenance marker for the later explicit promote command, then prints a compact verification summary for the expected include roots. It does not promote restored files, overwrite live Hermes/shared/systemd/Quadlet paths, or print secret values.
-
-## Monthly safe restore drill
-
-`restore-drill.sh` uses the safe restore command to restore `latest` into a temporary drill-only directory under `HERMES_BACKUP_DRILL_DIR`, `XDG_STATE_HOME/hermes-backup/drills`, or `~/.local/state/hermes-backup/drills`. It first takes the shared runtime lock so monthly drill restores do not overlap backup/prune/check operations. It then verifies every configured include root exists in the restored tree, runs `sqlite3 PRAGMA integrity_check` for restored `*.db` files, writes a redacted local drill log through the same `HERMES_BACKUP_LOG_DIR` interface as backup/check, and sends a compact raw Telegram Bot API report through the same local `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` config model. The report begins with `Hermes backup restore drill`, includes `status: PASS`, `status: FAIL`, or `status: SKIP`, and summarizes snapshot, safe drill target or skip reason, include-root counts, and SQLite counts.
-
-By default drill artifacts are deleted after the report; pass `--keep-artifacts` when Danny wants to inspect the restored drill directory manually. The command never invokes `promote.sh`, never writes to live Hermes/shared/systemd/Quadlet paths, never uses Hermes gateway or Hermes cron, and never prints B2 keys, restic passwords, Telegram tokens, repository URLs, file contents, or backup archives. Monthly scheduling is installed through the user systemd timer documented above, not through Hermes cron.
-
-## Explicit live promote command
-
-After inspecting a safe restore directory, promote it with an explicit guarded command:
-
-```bash
-RESTORE_DIR="<paste restore_target path printed by scripts/restore.sh>"
-scripts/promote.sh --dry-run "$RESTORE_DIR"
-scripts/promote.sh --yes --confirm PROMOTE-HERMES-RESTORE "$RESTORE_DIR"
-```
-
-`promote.sh` is intentionally separate from `restore.sh`; install, restore, timers, and future drill paths must not call it automatically. The command requires an absolute restore directory with the non-secret `.hermes-backup-restore.json` marker written by `restore.sh`, requires the expected restored include roots, refuses restore paths that overlap configured live include paths, and refuses symlinked restore/live path components. Dry-run mode prints the planned backup/promote actions plus a non-mutating Hermes quiesce plan. Confirmed mode may stop only the reviewed user-service allowlist (`hermes-gateway.service` and `hermes-dashboard.service`), requires manual review or `--quiesce-ack PROMOTE-HERMES-QUIESCE` for other active Hermes-like services/processes or unavailable probes, creates a unique local pre-promotion backup under `~/.local/state/hermes-backup/pre-promotion-backups/<timestamp>.<suffix>/`, replaces the configured live include roots from the inspected restore output, reloads user systemd state, and prints a checklist for Hermes profiles, shared outputs, shared-assets, systemd user units, and Quadlets. It prints paths/status only; it never prints B2 keys, restic passwords, Telegram credentials, file contents, or backup archives.
-
-Collocation baseline:
-
-- Keep one user-facing command per file under `scripts/` when downstream tickets add executable behavior.
-- Keep script-specific helper logic beside the owning script.
-- Move shared shell helpers under `lib/hermes-backup/` only after at least two commands reuse them; avoid catch-all `helpers` or `utils` buckets.
-- Keep tests and fixtures nearest to the behavior they verify.
-
-## Required offline verification
-
-Every foundation-bootstrap PR must include this command as reviewer evidence:
+Every foundation-bootstrap PR should include this offline-only harness as evidence:
 
 ```bash
 scripts/check.sh
 ```
 
-The harness is offline-only. It runs shell syntax checks, pytest coverage for preflight/config/install safety, and a Git ignored-file guard. It must not call B2, restic repositories, Telegram, Hermes cron, or `systemctl --user enable/start`.
+The harness runs shell syntax checks, pytest coverage for safety behavior, and ignored-file guards. It must not call B2, restic repositories, Telegram, Hermes cron, or `systemctl --user enable/start`.
 
-## Stress-friendly bootstrap checklist
+Collocation baseline:
 
-This foundation slice provides a safe install skeleton:
-
-```bash
-./install.sh
-```
-
-What it does now:
-
-1. Runs `scripts/preflight.sh --check` before any secret prompt.
-2. Creates local state/log/staging directories under `~/.local/state/hermes-backup/`, a safe restore directory at `~/restore/hermes-vm-backup/`, and the user systemd unit directory.
-3. Runs `scripts/configure.sh` to prompt locally for B2, restic, and raw Telegram Bot API values when local config does not already exist.
-4. Writes or reuses local-only config under `~/.config/hermes-backup/` with owner-only permissions.
-5. Renders backup/check/restore-drill systemd user units into `~/.config/systemd/user/` and runs `systemctl --user daemon-reload`.
-6. Leaves timers disabled by default; `./install.sh --enable-timers` enables only the approved backup/check/restore-drill timers after local scheduler verification.
-
-What is intentionally not active yet:
-
-- `install.sh` does not run backup, check, restore, promote, or drill commands.
-- `scripts/restore.sh` is available as a manual, safe, non-live restore command; install does not run it.
-- `scripts/promote.sh` is available only as a manual explicit live promote command; install, restore, check, timers, and drill paths do not run it automatically.
-- No restic repository is initialized by install.
-- No B2, restic, or Telegram network validation is run by install.
-- No Hermes cron scheduling is used.
-- No timer units are started by install; `--enable-timers` only enables user timer symlinks for the next user-manager activation.
-
-First-run repository verification now lives in `scripts/activate.sh`. Current-session timer starts remain intentionally manual because systemd catch-up behavior should be accepted by the operator at the terminal.
-
-## Current status
-
-This foundation, backup, safe-restore, check, promote, alert, drill-reporting, scheduler, and first-run activation slice establishes repo structure, docs, ignore rules, placeholder config, backup/check/restore-drill systemd user templates, safety tests, the offline preflight contract at `scripts/preflight.sh --check`, the local config/secret prompt writer at `scripts/configure.sh`, the bootstrap/systemd installer at `./install.sh`, SQLite-safe staging at `scripts/stage.sh`, the manual restic backup/retention command at `scripts/backup.sh`, the manual restic repository health check at `scripts/restic-check.sh`, the explicit first-run activation/check command at `scripts/activate.sh`, shared redacted local log/raw Telegram helpers under `lib/hermes-backup/log-alert.sh`, the manual non-live restore command at `scripts/restore.sh`, the manual explicit live promote command at `scripts/promote.sh`, and the manual safe monthly restore drill command at `scripts/restore-drill.sh`. Current-session timer start and broader end-to-end safety harness work remain downstream/manual.
+- Keep one user-facing command per file under `scripts/`.
+- Keep script-specific helper logic beside the owning script.
+- Move shared shell helpers under `lib/hermes-backup/` only after at least two commands reuse them.
+- Keep tests and fixtures nearest to the behavior they verify.
